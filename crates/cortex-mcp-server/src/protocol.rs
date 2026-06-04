@@ -87,6 +87,8 @@ pub const INVALID_PARAMS: i32 = -32602;
 pub const INTERNAL_ERROR: i32 = -32603;
 
 /// Server not initialized (extension MCP).
+// Pas unused : réservé pour future impl (extension MCP). Masqué via #[allow].
+#[allow(dead_code)]
 pub const SERVER_NOT_INITIALIZED: i32 = -32002;
 
 // ============================================================================
@@ -156,6 +158,7 @@ impl JsonRpcErrorResponse {
     }
 
     /// Construit une réponse erreur avec data.
+    #[allow(dead_code)] // API publique réservée, utilisée en interne
     pub fn error_with_data(
         id: Option<JsonValue>,
         code: i32,

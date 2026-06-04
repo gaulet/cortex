@@ -71,7 +71,7 @@ pub struct HttpLlmClient {
 // ============================================================================
 
 #[derive(Debug, Serialize)]
-struct OpenAiRequest {
+pub(crate) struct OpenAiRequest {
     model: String,
     messages: Vec<OpenAiMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -289,6 +289,7 @@ impl LlmClient for HttpLlmClient {
                 }
                 code => {
                     // Try to parse error details
+                    #[allow(clippy::unnecessary_lazy_evaluations)]
                     let detail = serde_json::from_str::<OpenAiErrorBody>(&body_str)
                         .ok()
                         .and_then(|b| b.error)

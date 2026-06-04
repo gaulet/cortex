@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use cortex_actors::{ActorRegistry, AuditRecord, JobResult, ProjectActorHandle};
 use cortex_brains::{Architect, FractalPlan, LlmClient};
-use cortex_core::{metrics::HistogramExt, RecoveryReport, RoutingRules, SharedMetrics, WalService};
+use cortex_core::{metrics::HistogramExt, RoutingRules, SharedMetrics, WalService};
 use cortex_webhooks::{WebhookDispatcher, WebhookEvent};
 
 use serde::{Deserialize, Serialize};
@@ -247,6 +247,8 @@ pub struct RecoverProjectRequest {
 }
 
 /// Réponse de l'outil `recover_project` — utilise `cortex_core::RecoveryReport`.
+#[allow(clippy::empty_line_after_doc_comments)]
+#[allow(clippy::empty_line_after_outer_attr)]
 // ============================================================================
 // Erreurs spécifiques au serveur Cortex
 // ============================================================================
@@ -370,6 +372,13 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         // Si CORTEX_WEBHOOK_URLS est vide, dispatcher = None (zéro overhead).
         let webhook_cfg = cortex_webhooks::WebhookConfig::from_env();
         let webhook_dispatcher = WebhookDispatcher::new(webhook_cfg);
+        match &webhook_dispatcher {
+            Some(d) => tracing::info!(
+                "Webhook dispatcher enabled: {} URL(s) configured",
+                d.urls().len()
+            ),
+            None => tracing::info!("Webhook dispatcher disabled (CORTEX_WEBHOOK_URLS empty)"),
+        }
 
         Self {
             wal: Arc::new(wal),
@@ -1369,9 +1378,7 @@ fn infer_theme_status(
         }
     }
 
-    if last_was_abort {
-        "failed".to_string()
-    } else if escalated > 0 {
+    if last_was_abort || escalated > 0 {
         "failed".to_string()
     } else if approved > 0 {
         "completed".to_string()

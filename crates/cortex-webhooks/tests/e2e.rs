@@ -3,7 +3,7 @@
 //! On lance un tokio::net::TcpListener qui capture les requêtes reçues,
 //! et on vérifie que le dispatcher envoie bien les bons payloads.
 
-use cortex_webhooks::{WebhookConfig, WebhookDispatcher, WebhookEvent, WebhookPayload};
+use cortex_webhooks::{WebhookConfig, WebhookDispatcher, WebhookEvent};
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

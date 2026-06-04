@@ -8,6 +8,8 @@
 //! 1. **WAL Entries** : Journal détaillé des mutations (prepare + commit)
 //! 2. **Cortex Commits** : Snapshots complets d'état projet (diff + full snapshot)
 //! 3. **Cortex States** : État courant (cache rapide pour lecture)
+#![allow(clippy::needless_return)] // les returns explicites sont plus lisibles dans les if/else backend dispatch
+
 //!
 //! # Backends supportés (Session 6 - option E)
 //!

@@ -75,10 +75,11 @@ pub const DEFAULT_BUCKETS: &[f64] = &[
 /// - N atomic adds (N = buckets.len(), default 15)
 /// - 1 atomic add (sum_micros)
 /// - 1 atomic add (count)
-/// → ~17 atomic ops/observe, négligeable (< 1µs sur x86).
+///
+/// Soit ~17 atomic ops/observe, négligeable (< 1µs sur x86).
 pub struct Histogram {
     buckets: Vec<(f64, AtomicU64)>, // (upper_bound_seconds, cumulative count)
-    sum_micros: AtomicI64,          // sum en microsecondes (i64::MAX = ~292 000 ans)
+    sum_micros: AtomicI64, // sum en microsecondes (i64::MAX = ~292 000 ans)
     count: AtomicU64,
 }
 

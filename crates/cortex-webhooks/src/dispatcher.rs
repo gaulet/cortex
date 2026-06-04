@@ -7,8 +7,7 @@ use reqwest::Client;
 use serde_json::Value as JsonValue;
 use sha2::Sha256;
 use std::sync::Arc;
-use std::time::Duration;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 /// Dispatcher de webhooks. Clone-able et Send (utilisable dans tout le code async).
 #[derive(Clone)]
@@ -44,7 +43,9 @@ impl WebhookDispatcher {
         let payload = WebhookPayload::new(event, project_id, data);
         let dispatcher = self.clone();
         tokio::spawn(async move {
-            dispatcher.deliver(payload).await;
+            // Best-effort : on ignore volontairement le Result de deliver().
+            // Les erreurs sont loggées en interne par le dispatcher.
+            let _ = dispatcher.deliver(payload).await;
         });
     }
 
