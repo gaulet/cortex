@@ -980,43 +980,67 @@ impl WalService {
 
     /// Charge l'état courant d'un projet.
     pub async fn load_state(&self, project_id: &str) -> Result<Option<JsonValue>> {
-        let row = match self.backend_kind {
-            BackendKind::Sqlite => {
-                #[cfg(feature = "sqlite")]
-                {
-                    let pool = self.sqlite_pool.as_ref().unwrap();
-                    sqlx::query("SELECT state_json FROM cortex_states WHERE project_id = ?")
-                        .bind(project_id)
-                        .fetch_optional(pool)
-                        .await
-                        .map_err(|e| CortexError::WalError(format!("load state (sqlite) failed: {}", e)))?
-                }
-                #[cfg(not(feature = "sqlite"))]
-                return Err(CortexError::WalError("SQLite feature disabled".into()));
+        if self.backend_kind == BackendKind::Sqlite {
+            #[cfg(feature = "sqlite")]
+            {
+                let row_opt = self.load_state_sqlite(project_id).await?;
+                return match row_opt {
+                    Some(row) => {
+                        let state_json: String = row.get::<String, _>("state_json");
+                        Ok(Some(serde_json::from_str(&state_json)?))
+                    }
+                    None => Ok(None),
+                };
             }
-            BackendKind::Postgres => {
-                #[cfg(feature = "postgres")]
-                {
-                    let pool = self.postgres_pool.as_ref().unwrap();
-                    sqlx::query("SELECT state_json FROM cortex_states WHERE project_id = $1")
-                        .bind(project_id)
-                        .fetch_optional(pool)
-                        .await
-                        .map_err(|e| CortexError::WalError(format!("load state (postgres) failed: {}", e)))?
-                }
-                #[cfg(not(feature = "postgres"))]
-                return Err(CortexError::WalError("Postgres feature disabled".into()));
+            #[cfg(not(feature = "sqlite"))]
+            return Err(CortexError::WalError("SQLite feature disabled".into()));
+        } else {
+            #[cfg(feature = "postgres")]
+            {
+                let row_opt = self.load_state_postgres(project_id).await?;
+                return match row_opt {
+                    Some(row) => {
+                        let state_json: String = row.get::<String, _>("state_json");
+                        Ok(Some(serde_json::from_str(&state_json)?))
+                    }
+                    None => Ok(None),
+                };
             }
-        };
-
-        match row {
-            Some(row) => {
-                let state_json: String = row.get::<String, _>("state_json");
-                let state: JsonValue = serde_json::from_str(&state_json)?;
-                Ok(Some(state))
-            }
-            None => Ok(None),
+            #[cfg(not(feature = "postgres"))]
+            return Err(CortexError::WalError("Postgres feature disabled".into()));
         }
+    }
+
+    #[cfg(feature = "sqlite")]
+    async fn load_state_sqlite(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<sqlx::sqlite::SqliteRow>> {
+        let pool = self
+            .sqlite_pool
+            .as_ref()
+            .ok_or_else(|| CortexError::WalError("SQLite pool not initialized".into()))?;
+        sqlx::query("SELECT state_json FROM cortex_states WHERE project_id = ?")
+            .bind(project_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| CortexError::WalError(format!("load state (sqlite) failed: {}", e)))
+    }
+
+    #[cfg(feature = "postgres")]
+    async fn load_state_postgres(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<sqlx::postgres::PgRow>> {
+        let pool = self
+            .postgres_pool
+            .as_ref()
+            .ok_or_else(|| CortexError::WalError("Postgres pool not initialized".into()))?;
+        sqlx::query("SELECT state_json FROM cortex_states WHERE project_id = $1")
+            .bind(project_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| CortexError::WalError(format!("load state (postgres) failed: {}", e)))
     }
 }
 
