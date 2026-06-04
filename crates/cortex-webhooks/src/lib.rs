@@ -55,10 +55,10 @@
 
 #![warn(missing_docs)]
 
+mod config;
 mod dispatcher;
 mod event;
-mod config;
 
+pub use config::WebhookConfig;
 pub use dispatcher::WebhookDispatcher;
 pub use event::{WebhookEvent, WebhookPayload};
-pub use config::WebhookConfig;

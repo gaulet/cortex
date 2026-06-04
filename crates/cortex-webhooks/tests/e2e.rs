@@ -242,7 +242,11 @@ async fn test_e2e_retry_on_5xx() {
                 let response = format!(
                     "HTTP/1.1 {} {}\r\nContent-Length: 0\r\n\r\n",
                     status,
-                    if *count < 3 { "Internal Server Error" } else { "OK" }
+                    if *count < 3 {
+                        "Internal Server Error"
+                    } else {
+                        "OK"
+                    }
                 );
                 let _ = stream.write_all(response.as_bytes()).await;
                 let _ = stream.shutdown().await;

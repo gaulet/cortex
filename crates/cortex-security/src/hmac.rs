@@ -28,10 +28,10 @@ pub fn sign_guardrails(secret: &[u8], payload: &serde_json::Value) -> Result<Str
     if secret.is_empty() {
         return Err(HmacError::SetupError("empty secret".into()));
     }
-    let mut mac = HmacSha256::new_from_slice(secret)
-        .map_err(|e| HmacError::SetupError(e.to_string()))?;
-    let canonical = serde_json::to_string(payload)
-        .map_err(|e| HmacError::SetupError(e.to_string()))?;
+    let mut mac =
+        HmacSha256::new_from_slice(secret).map_err(|e| HmacError::SetupError(e.to_string()))?;
+    let canonical =
+        serde_json::to_string(payload).map_err(|e| HmacError::SetupError(e.to_string()))?;
     mac.update(canonical.as_bytes());
     let result = mac.finalize();
     Ok(hex::encode(result.into_bytes()))

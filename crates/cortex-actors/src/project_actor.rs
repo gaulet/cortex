@@ -47,22 +47,13 @@ pub enum ProjectMessage {
         reply: oneshot::Sender<ProjectStateSnapshot>,
     },
     /// Demande si le projet est aborted (court-circuit rapide).
-    IsAborted {
-        reply: oneshot::Sender<bool>,
-    },
+    IsAborted { reply: oneshot::Sender<bool> },
     /// Enregistre un plan après intercept_plan.
-    RecordPlan {
-        plan: FractalPlan,
-    },
+    RecordPlan { plan: FractalPlan },
     /// Enregistre le résultat d'un job après sync_reflect.
-    RecordJobResult {
-        result: JobResult,
-    },
+    RecordJobResult { result: JobResult },
     /// Marque le projet comme aborted.
-    MarkAborted {
-        reason: String,
-        timestamp_ms: i64,
-    },
+    MarkAborted { reason: String, timestamp_ms: i64 },
     /// Reset l'état aborted (pour recovery test).
     ClearAborted,
     /// Compte les jobs par status.
@@ -82,9 +73,7 @@ pub struct ProjectActorHandle {
 
 impl ProjectActorHandle {
     /// Retrieve a clone of the current scratchpad (read-only snapshot, legacy).
-    pub async fn get_scratchpad(
-        &self,
-    ) -> Result<cortex_core::Scratchpad, String> {
+    pub async fn get_scratchpad(&self) -> Result<cortex_core::Scratchpad, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(ProjectMessage::GetScratchpad { reply: reply_tx })
@@ -155,9 +144,7 @@ impl ProjectActorHandle {
     }
 
     /// Compte les jobs par status.
-    pub async fn jobs_by_status(
-        &self,
-    ) -> Result<std::collections::HashMap<String, usize>, String> {
+    pub async fn jobs_by_status(&self) -> Result<std::collections::HashMap<String, usize>, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(ProjectMessage::JobsByStatus { reply: reply_tx })
@@ -201,10 +188,7 @@ impl ProjectActor {
     }
 
     /// Convenience: spawn from scratchpad (legacy compat).
-    pub fn spawn_from_scratchpad(
-        project_id: String,
-        scratchpad: Scratchpad,
-    ) -> ProjectActorHandle {
+    pub fn spawn_from_scratchpad(project_id: String, scratchpad: Scratchpad) -> ProjectActorHandle {
         let state = ProjectState {
             project_id: project_id.clone(),
             scratchpad,
@@ -275,10 +259,7 @@ impl ProjectActor {
 
     fn snapshot(&self) -> ProjectStateSnapshot {
         let (themes_count, tasks_count) = match &self.state.plan {
-            Some(p) => (
-                p.themes.len(),
-                p.themes.iter().map(|t| t.tasks.len()).sum(),
-            ),
+            Some(p) => (p.themes.len(), p.themes.iter().map(|t| t.tasks.len()).sum()),
             None => (0, 0),
         };
         ProjectStateSnapshot {

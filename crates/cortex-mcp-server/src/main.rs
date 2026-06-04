@@ -47,7 +47,9 @@ pub use server::{CortexServer, CortexServerError};
 use std::io::{self, BufRead, Write};
 
 use async_trait::async_trait;
-use cortex_brains::{Architect, HttpLlmClient, LlmClient, LlmError, LlmRequest, LlmResponse, MockLlmClient};
+use cortex_brains::{
+    Architect, HttpLlmClient, LlmClient, LlmError, LlmRequest, LlmResponse, MockLlmClient,
+};
 use cortex_core::WalService;
 
 use dispatch::dispatch;
@@ -85,8 +87,7 @@ async fn main() -> Result<()> {
         .with_max_level(Level::INFO)
         .with_writer(std::io::stderr)
         .finish();
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("failed to set tracing subscriber");
+    tracing::subscriber::set_global_default(subscriber).expect("failed to set tracing subscriber");
 
     info!("Cortex MCP server starting");
     info!("Version: {}", env!("CARGO_PKG_VERSION"));

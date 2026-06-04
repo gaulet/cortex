@@ -8,9 +8,9 @@
 
 use std::sync::Arc;
 
+use cortex_actors::{ActorRegistry, AuditRecord, JobResult, ProjectActorHandle};
 use cortex_brains::{Architect, FractalPlan, LlmClient};
 use cortex_core::{metrics::HistogramExt, RecoveryReport, RoutingRules, SharedMetrics, WalService};
-use cortex_actors::{ActorRegistry, ProjectActorHandle, JobResult, AuditRecord};
 use cortex_webhooks::{WebhookDispatcher, WebhookEvent};
 
 use serde::{Deserialize, Serialize};
@@ -133,7 +133,7 @@ pub struct DispatchableTheme {
     pub criticity_score: u8,
     pub estimated_tokens: u32,
     pub depends_on: Vec<String>,
-    pub guardrails_request: bool, // criticity ≥ 4
+    pub guardrails_request: bool,     // criticity ≥ 4
     pub red_team_audit_request: bool, // criticity ≥ 3
     pub tasks: Vec<cortex_brains::PlannedTask>,
 }
@@ -172,11 +172,11 @@ pub struct SyncReflectRequest {
 /// Réponse de l'outil `sync_reflect`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncReflectResponse {
-pub job_id: String,
-pub passed: bool,
-pub approved: bool, // = passed
-pub action: String, // "commit" | "retry" | "escalate"
-pub audit: RedTeamAuditResponse,
+    pub job_id: String,
+    pub passed: bool,
+    pub approved: bool, // = passed
+    pub action: String, // "commit" | "retry" | "escalate"
+    pub audit: RedTeamAuditResponse,
 }
 
 /// Requête pour l'outil `check_jobs_status`.
@@ -334,7 +334,12 @@ pub struct CortexServer<C: LlmClient + Clone> {
 impl<C: LlmClient + Clone> CortexServer<C> {
     /// Crée une instance du serveur Cortex.
     pub fn new(wal: WalService, architect: Architect<C>, llm_client: C) -> Self {
-        Self::with_metrics(wal, architect, llm_client, Arc::new(cortex_core::Metrics::new()))
+        Self::with_metrics(
+            wal,
+            architect,
+            llm_client,
+            Arc::new(cortex_core::Metrics::new()),
+        )
     }
 
     /// Constructeur qui injecte des metrics custom (utile pour tests).
@@ -621,11 +626,15 @@ impl<C: LlmClient + Clone> CortexServer<C> {
                     .map_err(|e| format!("{}", e))
             }
             (None, Some(_)) => {
-                tracing::warn!("Guardrails have HMAC signature but no server secret — skipping verify");
+                tracing::warn!(
+                    "Guardrails have HMAC signature but no server secret — skipping verify"
+                );
                 Ok(())
             }
             (Some(_), None) => {
-                tracing::warn!("Server has HMAC secret but guardrails are unsigned — possible downgrade");
+                tracing::warn!(
+                    "Server has HMAC secret but guardrails are unsigned — possible downgrade"
+                );
                 Ok(())
             }
             (None, None) => Ok(()),
@@ -729,8 +738,9 @@ impl<C: LlmClient + Clone> CortexServer<C> {
                     ))
                 })?;
             let snapshot = &state["plan"];
-            serde_json::from_value(snapshot.clone())
-                .map_err(|e| CortexServerError::InternalError(format!("Invalid cached plan: {}", e)))?
+            serde_json::from_value(snapshot.clone()).map_err(|e| {
+                CortexServerError::InternalError(format!("Invalid cached plan: {}", e))
+            })?
         };
 
         // 2. Log approval dans WAL
@@ -841,7 +851,11 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         // 2. Decide action
         let action = if audit.passed {
             "commit"
-        } else if audit.issues.iter().any(|i| i.severity == cortex_brains::red_team::Severity::Critical) {
+        } else if audit
+            .issues
+            .iter()
+            .any(|i| i.severity == cortex_brains::red_team::Severity::Critical)
+        {
             "escalate"
         } else {
             "retry"
@@ -915,7 +929,7 @@ impl<C: LlmClient + Clone> CortexServer<C> {
             passed: audit.passed,
             approved: audit.passed,
             action,
-            audit: audit,
+            audit,
         })
     }
 
@@ -947,15 +961,13 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         // 3. Build theme status list
         let themes: Vec<ThemeStatus> = if let Some(state) = state {
             if let Some(plan) = state.get("plan") {
-                if let Ok(plan) =
-                    serde_json::from_value::<cortex_brains::FractalPlan>(plan.clone())
+                if let Ok(plan) = serde_json::from_value::<cortex_brains::FractalPlan>(plan.clone())
                 {
                     plan.themes
                         .iter()
                         .map(|t| {
                             // Check if there's a sync_reflect commit for this theme's first task
-                            let jobs_status =
-                                infer_theme_status(&commits, &t.id, &t.tasks);
+                            let jobs_status = infer_theme_status(&commits, &t.id, &t.tasks);
                             ThemeStatus {
                                 theme_id: t.id.clone(),
                                 name: t.name.clone(),
@@ -1028,7 +1040,10 @@ impl<C: LlmClient + Clone> CortexServer<C> {
             .save_state(
                 &request.project_id,
                 &target.snapshot,
-                Some(&format!("Rolled back to {}: {}", target.commit_id, request.reason)),
+                Some(&format!(
+                    "Rolled back to {}: {}",
+                    target.commit_id, request.reason
+                )),
             )
             .await
             .map_err(|e| CortexServerError::WalError(e.to_string()))?;
@@ -1065,9 +1080,7 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         // Session 6 (option C) : get-or-spawn l'actor et mark aborted.
         // Toutes les opérations ultérieures sur ce projet court-circuiteront.
         let actor = self.get_or_spawn_actor(&request.project_id).await?;
-        let _ = actor
-            .mark_aborted(request.reason.clone(), now)
-            .await;
+        let _ = actor.mark_aborted(request.reason.clone(), now).await;
 
         let entry_id = self
             .wal
@@ -1136,9 +1149,9 @@ impl<C: LlmClient + Clone> CortexServer<C> {
 
         // Session 6 (option C) : clear le flag aborted de l'actor après recovery
         // réussi, pour permettre au projet de reprendre normalement.
-        if let Ok(actor) = self
-            .actor_registry
-            .get_or_create(&request.project_id, &request.project_id, "")
+        if let Ok(actor) =
+            self.actor_registry
+                .get_or_create(&request.project_id, &request.project_id, "")
         {
             let _ = actor.clear_aborted().await;
         }
@@ -1199,7 +1212,10 @@ fn build_summary(plan: &FractalPlan) -> String {
     }
 
     if max_criticity >= 4 {
-        parts.push(format!("criticité max {} (Pre-Mortem activé)", max_criticity));
+        parts.push(format!(
+            "criticité max {} (Pre-Mortem activé)",
+            max_criticity
+        ));
     } else if max_criticity >= 3 {
         parts.push(format!("criticité max {} (Red-Team activé)", max_criticity));
     }
@@ -1339,8 +1355,7 @@ fn infer_theme_status(
                     "sync_reflect" | "task_completed" => {
                         if c.diff.get("passed").and_then(|v| v.as_bool()) == Some(true) {
                             approved += 1;
-                        } else if c.diff.get("action").and_then(|v| v.as_str())
-                            == Some("escalate")
+                        } else if c.diff.get("action").and_then(|v| v.as_str()) == Some("escalate")
                         {
                             escalated += 1;
                         }
@@ -1807,14 +1822,38 @@ mod tests {
         // Vérifie que le format Prometheus contient bien les 8 histogrammes.
         let server = make_test_server().await;
         // On observe chaque histogramme une fois
-        server.metrics.intercept_plan_duration.observe(Duration::from_millis(10));
-        server.metrics.pre_mortem_duration.observe(Duration::from_millis(20));
-        server.metrics.red_team_audit_duration.observe(Duration::from_millis(30));
-        server.metrics.sync_reflect_duration.observe(Duration::from_millis(40));
-        server.metrics.approve_and_execute_duration.observe(Duration::from_millis(50));
-        server.metrics.recover_project_duration.observe(Duration::from_millis(60));
-        server.metrics.harvest_insights_duration.observe(Duration::from_millis(70));
-        server.metrics.llm_request_duration.observe(Duration::from_millis(80));
+        server
+            .metrics
+            .intercept_plan_duration
+            .observe(Duration::from_millis(10));
+        server
+            .metrics
+            .pre_mortem_duration
+            .observe(Duration::from_millis(20));
+        server
+            .metrics
+            .red_team_audit_duration
+            .observe(Duration::from_millis(30));
+        server
+            .metrics
+            .sync_reflect_duration
+            .observe(Duration::from_millis(40));
+        server
+            .metrics
+            .approve_and_execute_duration
+            .observe(Duration::from_millis(50));
+        server
+            .metrics
+            .recover_project_duration
+            .observe(Duration::from_millis(60));
+        server
+            .metrics
+            .harvest_insights_duration
+            .observe(Duration::from_millis(70));
+        server
+            .metrics
+            .llm_request_duration
+            .observe(Duration::from_millis(80));
 
         let out = server.get_metrics_prometheus();
         // Vérif que les 8 histogrammes sont présents

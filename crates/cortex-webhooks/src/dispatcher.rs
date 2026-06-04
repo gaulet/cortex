@@ -179,8 +179,12 @@ pub enum WebhookError {
 /// Signe un payload avec HMAC-SHA256, retourne le format `hmac_sha256=<hex>`.
 fn compute_hmac(secret: &str, payload: &WebhookPayload) -> Result<String, WebhookError> {
     let body = serde_json::to_string(payload).map_err(WebhookError::Serialize)?;
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret.as_bytes())
-        .map_err(|e| WebhookError::Serialize(serde_json::Error::io(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))))?;
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret.as_bytes()).map_err(|e| {
+        WebhookError::Serialize(serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            e.to_string(),
+        )))
+    })?;
     mac.update(body.as_bytes());
     let result = mac.finalize();
     Ok(format!("hmac_sha256={}", hex::encode(result.into_bytes())))
@@ -207,7 +211,10 @@ mod tests {
 
     #[test]
     fn test_urls_exposed() {
-        let urls = vec!["https://a.com/wh".to_string(), "https://b.com/wh".to_string()];
+        let urls = vec![
+            "https://a.com/wh".to_string(),
+            "https://b.com/wh".to_string(),
+        ];
         let cfg = WebhookConfig::from_urls(urls.clone());
         let d = WebhookDispatcher::new(cfg).expect("enabled");
         assert_eq!(d.urls(), urls);

@@ -195,9 +195,9 @@ impl WalService {
     async fn connect_sqlite(url: &str) -> Result<Self> {
         use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
-        let opts: SqliteConnectOptions = url
-            .parse()
-            .map_err(|e: sqlx::Error| CortexError::WalError(format!("invalid SQLite URL: {}", e)))?;
+        let opts: SqliteConnectOptions = url.parse().map_err(|e: sqlx::Error| {
+            CortexError::WalError(format!("invalid SQLite URL: {}", e))
+        })?;
 
         // Activer WAL mode pour performance/concurrence
         let opts = opts
@@ -270,9 +270,10 @@ impl WalService {
 
     #[cfg(feature = "sqlite")]
     async fn run_migrations_sqlite(&self) -> Result<()> {
-        let pool = self.sqlite_pool.as_ref().ok_or_else(|| {
-            CortexError::WalError("SQLite pool not initialized".into())
-        })?;
+        let pool = self
+            .sqlite_pool
+            .as_ref()
+            .ok_or_else(|| CortexError::WalError("SQLite pool not initialized".into()))?;
 
         for stmt in SQLITE_MIGRATION_STATEMENTS {
             sqlx::query(stmt)
@@ -285,9 +286,10 @@ impl WalService {
 
     #[cfg(feature = "postgres")]
     async fn run_migrations_postgres(&self) -> Result<()> {
-        let pool = self.postgres_pool.as_ref().ok_or_else(|| {
-            CortexError::WalError("Postgres pool not initialized".into())
-        })?;
+        let pool = self
+            .postgres_pool
+            .as_ref()
+            .ok_or_else(|| CortexError::WalError("Postgres pool not initialized".into()))?;
 
         for stmt in POSTGRES_MIGRATION_STATEMENTS {
             sqlx::query(stmt)
@@ -313,10 +315,7 @@ impl WalService {
     // ============================================================
 
     /// Recover uncommitted WAL entries (crash recovery).
-    pub async fn recover_uncommitted(
-        &self,
-        project_id: &str,
-    ) -> Result<RecoveryReport> {
+    pub async fn recover_uncommitted(&self, project_id: &str) -> Result<RecoveryReport> {
         let uncommitted = self.list_uncommitted(project_id).await?;
         let mut report = RecoveryReport {
             project_id: project_id.to_string(),
@@ -442,7 +441,9 @@ impl WalService {
                     .bind(entry_id)
                     .execute(pool)
                     .await
-                    .map_err(|e| CortexError::WalError(format!("write_commit (sqlite) failed: {}", e)))?;
+                    .map_err(|e| {
+                        CortexError::WalError(format!("write_commit (sqlite) failed: {}", e))
+                    })?;
                     result.rows_affected()
                 }
                 #[cfg(not(feature = "sqlite"))]
@@ -501,9 +502,10 @@ impl WalService {
 
     #[cfg(feature = "sqlite")]
     async fn read_entry_sqlite(&self, entry_id: &str) -> Result<sqlx::sqlite::SqliteRow> {
-        let pool = self.sqlite_pool.as_ref().ok_or_else(|| {
-            CortexError::WalError("SQLite pool not initialized".into())
-        })?;
+        let pool = self
+            .sqlite_pool
+            .as_ref()
+            .ok_or_else(|| CortexError::WalError("SQLite pool not initialized".into()))?;
         sqlx::query(
             r#"
             SELECT entry_id, project_id, timestamp, action, job_id, theme_id, data_json, committed, created_at
@@ -518,9 +520,10 @@ impl WalService {
 
     #[cfg(feature = "postgres")]
     async fn read_entry_postgres(&self, entry_id: &str) -> Result<sqlx::postgres::PgRow> {
-        let pool = self.postgres_pool.as_ref().ok_or_else(|| {
-            CortexError::WalError("Postgres pool not initialized".into())
-        })?;
+        let pool = self
+            .postgres_pool
+            .as_ref()
+            .ok_or_else(|| CortexError::WalError("Postgres pool not initialized".into()))?;
         sqlx::query(
             r#"
             SELECT entry_id, project_id, timestamp, action, job_id, theme_id, data_json, committed, created_at
@@ -599,9 +602,10 @@ impl WalService {
         &self,
         project_id: &str,
     ) -> Result<Vec<sqlx::sqlite::SqliteRow>> {
-        let pool = self.sqlite_pool.as_ref().ok_or_else(|| {
-            CortexError::WalError("SQLite pool not initialized".into())
-        })?;
+        let pool = self
+            .sqlite_pool
+            .as_ref()
+            .ok_or_else(|| CortexError::WalError("SQLite pool not initialized".into()))?;
         sqlx::query(
             r#"
             SELECT entry_id, project_id, timestamp, action, job_id, theme_id, data_json, committed, created_at
@@ -620,9 +624,10 @@ impl WalService {
         &self,
         project_id: &str,
     ) -> Result<Vec<sqlx::postgres::PgRow>> {
-        let pool = self.postgres_pool.as_ref().ok_or_else(|| {
-            CortexError::WalError("Postgres pool not initialized".into())
-        })?;
+        let pool = self
+            .postgres_pool
+            .as_ref()
+            .ok_or_else(|| CortexError::WalError("Postgres pool not initialized".into()))?;
         sqlx::query(
             r#"
             SELECT entry_id, project_id, timestamp, action, job_id, theme_id, data_json, committed, created_at
@@ -649,7 +654,9 @@ impl WalService {
                     .bind(project_id)
                     .execute(pool)
                     .await
-                    .map_err(|e| CortexError::WalError(format!("rollback (sqlite) failed: {}", e)))?;
+                    .map_err(|e| {
+                        CortexError::WalError(format!("rollback (sqlite) failed: {}", e))
+                    })?;
                     result.rows_affected()
                 }
                 #[cfg(not(feature = "sqlite"))]
@@ -665,7 +672,9 @@ impl WalService {
                     .bind(project_id)
                     .execute(pool)
                     .await
-                    .map_err(|e| CortexError::WalError(format!("rollback (postgres) failed: {}", e)))?;
+                    .map_err(|e| {
+                        CortexError::WalError(format!("rollback (postgres) failed: {}", e))
+                    })?;
                     result.rows_affected()
                 }
                 #[cfg(not(feature = "postgres"))]
@@ -819,13 +828,11 @@ impl WalService {
     }
 
     #[cfg(feature = "sqlite")]
-    async fn list_commits_sqlite(
-        &self,
-        project_id: &str,
-    ) -> Result<Vec<sqlx::sqlite::SqliteRow>> {
-        let pool = self.sqlite_pool.as_ref().ok_or_else(|| {
-            CortexError::WalError("SQLite pool not initialized".into())
-        })?;
+    async fn list_commits_sqlite(&self, project_id: &str) -> Result<Vec<sqlx::sqlite::SqliteRow>> {
+        let pool = self
+            .sqlite_pool
+            .as_ref()
+            .ok_or_else(|| CortexError::WalError("SQLite pool not initialized".into()))?;
         sqlx::query(
             r#"
             SELECT commit_id, project_id, timestamp, previous_commit, mutation_type, trigger_reason, diff_json, snapshot_json, checksum
@@ -840,13 +847,11 @@ impl WalService {
     }
 
     #[cfg(feature = "postgres")]
-    async fn list_commits_postgres(
-        &self,
-        project_id: &str,
-    ) -> Result<Vec<sqlx::postgres::PgRow>> {
-        let pool = self.postgres_pool.as_ref().ok_or_else(|| {
-            CortexError::WalError("Postgres pool not initialized".into())
-        })?;
+    async fn list_commits_postgres(&self, project_id: &str) -> Result<Vec<sqlx::postgres::PgRow>> {
+        let pool = self
+            .postgres_pool
+            .as_ref()
+            .ok_or_else(|| CortexError::WalError("Postgres pool not initialized".into()))?;
         sqlx::query(
             r#"
             SELECT commit_id, project_id, timestamp, previous_commit, mutation_type, trigger_reason, diff_json, snapshot_json, checksum
@@ -861,10 +866,7 @@ impl WalService {
     }
 
     #[cfg(feature = "sqlite")]
-    fn cortex_commit_from_sqlite_row(
-        &self,
-        row: sqlx::sqlite::SqliteRow,
-    ) -> Result<CortexCommit> {
+    fn cortex_commit_from_sqlite_row(&self, row: sqlx::sqlite::SqliteRow) -> Result<CortexCommit> {
         let diff_json: String = row.get::<String, _>("diff_json");
         let snapshot_json: String = row.get::<String, _>("snapshot_json");
         Ok(CortexCommit {
@@ -874,21 +876,16 @@ impl WalService {
             previous_commit: row.get("previous_commit"),
             mutation_type: row.get("mutation_type"),
             trigger_reason: row.get("trigger_reason"),
-            diff: serde_json::from_str(&diff_json).map_err(|e| {
-                CortexError::WalError(format!("diff parse error: {}", e))
-            })?,
-            snapshot: serde_json::from_str(&snapshot_json).map_err(|e| {
-                CortexError::WalError(format!("snapshot parse error: {}", e))
-            })?,
+            diff: serde_json::from_str(&diff_json)
+                .map_err(|e| CortexError::WalError(format!("diff parse error: {}", e)))?,
+            snapshot: serde_json::from_str(&snapshot_json)
+                .map_err(|e| CortexError::WalError(format!("snapshot parse error: {}", e)))?,
             checksum: row.get("checksum"),
         })
     }
 
     #[cfg(feature = "postgres")]
-    fn cortex_commit_from_postgres_row(
-        &self,
-        row: sqlx::postgres::PgRow,
-    ) -> Result<CortexCommit> {
+    fn cortex_commit_from_postgres_row(&self, row: sqlx::postgres::PgRow) -> Result<CortexCommit> {
         let diff_json: String = row.get::<String, _>("diff_json");
         let snapshot_json: String = row.get::<String, _>("snapshot_json");
         Ok(CortexCommit {
@@ -898,12 +895,10 @@ impl WalService {
             previous_commit: row.get("previous_commit"),
             mutation_type: row.get("mutation_type"),
             trigger_reason: row.get("trigger_reason"),
-            diff: serde_json::from_str(&diff_json).map_err(|e| {
-                CortexError::WalError(format!("diff parse error: {}", e))
-            })?,
-            snapshot: serde_json::from_str(&snapshot_json).map_err(|e| {
-                CortexError::WalError(format!("snapshot parse error: {}", e))
-            })?,
+            diff: serde_json::from_str(&diff_json)
+                .map_err(|e| CortexError::WalError(format!("diff parse error: {}", e)))?,
+            snapshot: serde_json::from_str(&snapshot_json)
+                .map_err(|e| CortexError::WalError(format!("snapshot parse error: {}", e)))?,
             checksum: row.get("checksum"),
         })
     }
@@ -1012,10 +1007,7 @@ impl WalService {
     }
 
     #[cfg(feature = "sqlite")]
-    async fn load_state_sqlite(
-        &self,
-        project_id: &str,
-    ) -> Result<Option<sqlx::sqlite::SqliteRow>> {
+    async fn load_state_sqlite(&self, project_id: &str) -> Result<Option<sqlx::sqlite::SqliteRow>> {
         let pool = self
             .sqlite_pool
             .as_ref()
@@ -1028,10 +1020,7 @@ impl WalService {
     }
 
     #[cfg(feature = "postgres")]
-    async fn load_state_postgres(
-        &self,
-        project_id: &str,
-    ) -> Result<Option<sqlx::postgres::PgRow>> {
+    async fn load_state_postgres(&self, project_id: &str) -> Result<Option<sqlx::postgres::PgRow>> {
         let pool = self
             .postgres_pool
             .as_ref()
@@ -1225,10 +1214,7 @@ mod tests {
             .await
             .unwrap();
 
-        let report = wal
-            .recover_uncommitted("proj_r")
-            .await
-            .expect("recover");
+        let report = wal.recover_uncommitted("proj_r").await.expect("recover");
         // L'entry déjà commitée n'apparaît pas dans uncommitted
         // → 2 uncommitted : sync_reflect (escalate) + unknown_action (rollback)
         assert_eq!(report.uncommitted_count, 2);
@@ -1315,10 +1301,7 @@ mod tests {
             .await
             .expect("live write_commit");
 
-        let entry = wal
-            .read_entry(&entry_id)
-            .await
-            .expect("live read_entry");
+        let entry = wal.read_entry(&entry_id).await.expect("live read_entry");
         assert_eq!(entry.action, "live_action");
         assert!(entry.committed);
     }
@@ -1366,12 +1349,24 @@ mod tests {
         wal.write_commit(&committed).await.expect("commit 1");
 
         let _to_escalate = wal
-            .write_prepare("live_proj_rec", "sync_reflect", Some("J-1"), None, &json!({}))
+            .write_prepare(
+                "live_proj_rec",
+                "sync_reflect",
+                Some("J-1"),
+                None,
+                &json!({}),
+            )
             .await
             .expect("prepare 2");
 
         let _to_rollback = wal
-            .write_prepare("live_proj_rec", "unknown_action_xyz", None, None, &json!({}))
+            .write_prepare(
+                "live_proj_rec",
+                "unknown_action_xyz",
+                None,
+                None,
+                &json!({}),
+            )
             .await
             .expect("prepare 3");
 

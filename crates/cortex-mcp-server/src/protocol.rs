@@ -209,8 +209,7 @@ mod tests {
 
     #[test]
     fn test_parse_request_invalid_json() {
-        let err = JsonRpcRequest::parse_line("{not json")
-            .expect_err("should fail on invalid json");
+        let err = JsonRpcRequest::parse_line("{not json").expect_err("should fail on invalid json");
         assert_eq!(err.code, PARSE_ERROR);
     }
 
@@ -232,10 +231,8 @@ mod tests {
 
     #[test]
     fn test_response_success_to_line() {
-        let resp = JsonRpcResponse::success(
-            JsonValue::Number(1.into()),
-            serde_json::json!({"ok": true}),
-        );
+        let resp =
+            JsonRpcResponse::success(JsonValue::Number(1.into()), serde_json::json!({"ok": true}));
         let line = resp.to_line();
         assert!(line.starts_with(r#"{"jsonrpc":"2.0","result":{"ok":true},"id":1}"#));
         assert!(line.ends_with('\n'));
@@ -255,11 +252,7 @@ mod tests {
 
     #[test]
     fn test_response_error_with_null_id() {
-        let resp = JsonRpcErrorResponse::error(
-            None,
-            PARSE_ERROR,
-            "Bad JSON".to_string(),
-        );
+        let resp = JsonRpcErrorResponse::error(None, PARSE_ERROR, "Bad JSON".to_string());
         let line = resp.to_line();
         assert!(line.contains(r#""id":null"#));
     }

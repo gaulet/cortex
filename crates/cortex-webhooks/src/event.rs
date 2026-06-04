@@ -73,8 +73,14 @@ mod tests {
     #[test]
     fn test_event_as_str() {
         assert_eq!(WebhookEvent::PlanGenerated.as_str(), "plan_generated");
-        assert_eq!(WebhookEvent::PreMortemEmitted.as_str(), "pre_mortem_emitted");
-        assert_eq!(WebhookEvent::RecoveryTriggered.as_str(), "recovery_triggered");
+        assert_eq!(
+            WebhookEvent::PreMortemEmitted.as_str(),
+            "pre_mortem_emitted"
+        );
+        assert_eq!(
+            WebhookEvent::RecoveryTriggered.as_str(),
+            "recovery_triggered"
+        );
         assert_eq!(WebhookEvent::AuditFailed.as_str(), "audit_failed");
         assert_eq!(WebhookEvent::Abort.as_str(), "abort");
     }
@@ -108,11 +114,8 @@ mod tests {
 
     #[test]
     fn test_payload_serialization_with_signature() {
-        let mut payload = WebhookPayload::new(
-            WebhookEvent::Abort,
-            Some("p".into()),
-            serde_json::json!({}),
-        );
+        let mut payload =
+            WebhookPayload::new(WebhookEvent::Abort, Some("p".into()), serde_json::json!({}));
         payload.signature = Some("hmac_sha256=deadbeef".to_string());
         let json = serde_json::to_string(&payload).expect("serialize");
         assert!(json.contains("signature"));

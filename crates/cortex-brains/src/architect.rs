@@ -296,9 +296,9 @@ fn parse_plan_response(response: &str) -> Result<FractalPlan, ArchitectError> {
     }
 
     // Cherche un bloc JSON dans la réponse (entre { et })
-    let json_start = response.find('{').ok_or_else(|| {
-        ArchitectError::ResponseParsingFailed("No JSON object found".to_string())
-    })?;
+    let json_start = response
+        .find('{')
+        .ok_or_else(|| ArchitectError::ResponseParsingFailed("No JSON object found".to_string()))?;
 
     // Trouve l'accolade fermante correspondante (simple heuristique : dernière })
     let json_end = response.rfind('}').ok_or_else(|| {
@@ -313,9 +313,8 @@ fn parse_plan_response(response: &str) -> Result<FractalPlan, ArchitectError> {
 
     let json_str = &response[json_start..=json_end];
 
-    serde_json::from_str::<FractalPlan>(json_str).map_err(|e| {
-        ArchitectError::ResponseParsingFailed(format!("JSON parse error: {}", e))
-    })
+    serde_json::from_str::<FractalPlan>(json_str)
+        .map_err(|e| ArchitectError::ResponseParsingFailed(format!("JSON parse error: {}", e)))
 }
 
 /// Valide le plan généré : vérifications de base.
@@ -475,7 +474,10 @@ mod tests {
         let architect = Architect::new(mock);
 
         let plan = architect
-            .generate_plan("Refactorise le module auth", "Contexte FastAPI + PostgreSQL")
+            .generate_plan(
+                "Refactorise le module auth",
+                "Contexte FastAPI + PostgreSQL",
+            )
             .await
             .expect("plan generation should succeed");
 

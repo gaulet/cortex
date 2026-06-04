@@ -161,10 +161,7 @@ mod tests {
     #[tokio::test]
     async fn test_mock_llm_client_with_custom_tokens() {
         let mock = MockLlmClient::with_full_response("Texte".into(), 42);
-        let resp = mock
-            .complete(LlmRequest::simple("".into()))
-            .await
-            .unwrap();
+        let resp = mock.complete(LlmRequest::simple("".into())).await.unwrap();
         assert_eq!(resp.tokens_used, Some(42));
     }
 }

@@ -39,7 +39,12 @@ impl WebhookConfig {
     pub fn from_env() -> Self {
         let urls: Vec<String> = std::env::var("CORTEX_WEBHOOK_URLS")
             .ok()
-            .map(|s| s.split(',').map(|u| u.trim().to_string()).filter(|u| !u.is_empty()).collect())
+            .map(|s| {
+                s.split(',')
+                    .map(|u| u.trim().to_string())
+                    .filter(|u| !u.is_empty())
+                    .collect()
+            })
             .unwrap_or_default();
 
         let timeout_secs: u64 = std::env::var("CORTEX_WEBHOOK_TIMEOUT")

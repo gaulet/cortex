@@ -78,17 +78,15 @@ pub const DEFAULT_BUCKETS: &[f64] = &[
 /// → ~17 atomic ops/observe, négligeable (< 1µs sur x86).
 pub struct Histogram {
     buckets: Vec<(f64, AtomicU64)>, // (upper_bound_seconds, cumulative count)
-    sum_micros: AtomicI64,           // sum en microsecondes (i64::MAX = ~292 000 ans)
+    sum_micros: AtomicI64,          // sum en microsecondes (i64::MAX = ~292 000 ans)
     count: AtomicU64,
 }
 
 impl Histogram {
     /// Crée un histogramme avec les buckets donnés (+ bucket +Inf ajouté).
     pub fn new(buckets: &[f64]) -> Self {
-        let mut b: Vec<(f64, AtomicU64)> = buckets
-            .iter()
-            .map(|&le| (le, AtomicU64::new(0)))
-            .collect();
+        let mut b: Vec<(f64, AtomicU64)> =
+            buckets.iter().map(|&le| (le, AtomicU64::new(0))).collect();
         // Bucket +Inf : capture tout ce qui dépasse le max bucket
         b.push((f64::INFINITY, AtomicU64::new(0)));
         Self {
@@ -170,10 +168,7 @@ impl HistogramSnapshot {
             } else {
                 format!("{}", le)
             };
-            out.push_str(&format!(
-                "{}_bucket{{le=\"{}\"}} {}\n",
-                name, le_str, count
-            ));
+            out.push_str(&format!("{}_bucket{{le=\"{}\"}} {}\n", name, le_str, count));
         }
         // Sum en secondes (Prometheus convention)
         let sum_secs = self.sum_micros as f64 / 1_000_000.0;
@@ -289,20 +284,43 @@ impl Metrics {
     }
 
     // Counter incrementers
-    pub fn inc_jobs_dispatched(&self) { self.jobs_dispatched.fetch_add(1, Ordering::Relaxed); }
-    pub fn inc_jobs_approved(&self) { self.jobs_approved.fetch_add(1, Ordering::Relaxed); }
-    pub fn inc_jobs_rejected(&self) { self.jobs_rejected.fetch_add(1, Ordering::Relaxed); }
-    pub fn inc_jobs_escalated(&self) { self.jobs_escalated.fetch_add(1, Ordering::Relaxed); }
-    pub fn inc_red_team_blocks(&self) { self.red_team_blocks.fetch_add(1, Ordering::Relaxed); }
-    pub fn add_pre_mortem_guards(&self, n: u64) {
-        self.pre_mortem_guards_emitted.fetch_add(n, Ordering::Relaxed);
+    pub fn inc_jobs_dispatched(&self) {
+        self.jobs_dispatched.fetch_add(1, Ordering::Relaxed);
     }
-    pub fn inc_hmac_ok(&self) { self.hmac_verifications_ok.fetch_add(1, Ordering::Relaxed); }
-    pub fn inc_hmac_fail(&self) { self.hmac_verifications_fail.fetch_add(1, Ordering::Relaxed); }
-    pub fn add_recovery_rolled_back(&self, n: u64) { self.recovery_rolled_back.fetch_add(n, Ordering::Relaxed); }
-    pub fn add_recovery_escalated(&self, n: u64) { self.recovery_escalated.fetch_add(n, Ordering::Relaxed); }
-    pub fn inc_llm_requests(&self) { self.llm_requests_total.fetch_add(1, Ordering::Relaxed); }
-    pub fn add_llm_tokens(&self, n: u64) { self.llm_tokens_consumed.fetch_add(n, Ordering::Relaxed); }
+    pub fn inc_jobs_approved(&self) {
+        self.jobs_approved.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_jobs_rejected(&self) {
+        self.jobs_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_jobs_escalated(&self) {
+        self.jobs_escalated.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_red_team_blocks(&self) {
+        self.red_team_blocks.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn add_pre_mortem_guards(&self, n: u64) {
+        self.pre_mortem_guards_emitted
+            .fetch_add(n, Ordering::Relaxed);
+    }
+    pub fn inc_hmac_ok(&self) {
+        self.hmac_verifications_ok.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_hmac_fail(&self) {
+        self.hmac_verifications_fail.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn add_recovery_rolled_back(&self, n: u64) {
+        self.recovery_rolled_back.fetch_add(n, Ordering::Relaxed);
+    }
+    pub fn add_recovery_escalated(&self, n: u64) {
+        self.recovery_escalated.fetch_add(n, Ordering::Relaxed);
+    }
+    pub fn inc_llm_requests(&self) {
+        self.llm_requests_total.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn add_llm_tokens(&self, n: u64) {
+        self.llm_tokens_consumed.fetch_add(n, Ordering::Relaxed);
+    }
 
     /// Sérialise TOUTES les métriques (counters + gauge + 8 histogrammes)
     /// au format Prometheus (text/plain).
@@ -315,23 +333,65 @@ impl Metrics {
 
         // ============ COUNTERS (13) ============
         let counters: [(&str, &str, u64); 12] = [
-            ("cortex_jobs_dispatched_total", "Total jobs dispatched", self.jobs_dispatched.load(Ordering::Relaxed)),
-            ("cortex_jobs_approved_total", "Total jobs approved", self.jobs_approved.load(Ordering::Relaxed)),
-            ("cortex_jobs_rejected_total", "Total jobs rejected", self.jobs_rejected.load(Ordering::Relaxed)),
-            ("cortex_jobs_escalated_total", "Total jobs escalated", self.jobs_escalated.load(Ordering::Relaxed)),
-            ("cortex_red_team_blocks_total", "Red-Team audits that blocked", self.red_team_blocks.load(Ordering::Relaxed)),
-            ("cortex_pre_mortem_guards_emitted_total", "Guardrails emitted", self.pre_mortem_guards_emitted.load(Ordering::Relaxed)),
-            ("cortex_recovery_rolled_back_total", "Recovery entries rolled back", self.recovery_rolled_back.load(Ordering::Relaxed)),
-            ("cortex_recovery_escalated_total", "Recovery entries escalated", self.recovery_escalated.load(Ordering::Relaxed)),
-            ("cortex_llm_requests_total", "LLM API calls", self.llm_requests_total.load(Ordering::Relaxed)),
-            ("cortex_llm_tokens_consumed_total", "LLM tokens consumed", self.llm_tokens_consumed.load(Ordering::Relaxed)),
+            (
+                "cortex_jobs_dispatched_total",
+                "Total jobs dispatched",
+                self.jobs_dispatched.load(Ordering::Relaxed),
+            ),
+            (
+                "cortex_jobs_approved_total",
+                "Total jobs approved",
+                self.jobs_approved.load(Ordering::Relaxed),
+            ),
+            (
+                "cortex_jobs_rejected_total",
+                "Total jobs rejected",
+                self.jobs_rejected.load(Ordering::Relaxed),
+            ),
+            (
+                "cortex_jobs_escalated_total",
+                "Total jobs escalated",
+                self.jobs_escalated.load(Ordering::Relaxed),
+            ),
+            (
+                "cortex_red_team_blocks_total",
+                "Red-Team audits that blocked",
+                self.red_team_blocks.load(Ordering::Relaxed),
+            ),
+            (
+                "cortex_pre_mortem_guards_emitted_total",
+                "Guardrails emitted",
+                self.pre_mortem_guards_emitted.load(Ordering::Relaxed),
+            ),
+            (
+                "cortex_recovery_rolled_back_total",
+                "Recovery entries rolled back",
+                self.recovery_rolled_back.load(Ordering::Relaxed),
+            ),
+            (
+                "cortex_recovery_escalated_total",
+                "Recovery entries escalated",
+                self.recovery_escalated.load(Ordering::Relaxed),
+            ),
+            (
+                "cortex_llm_requests_total",
+                "LLM API calls",
+                self.llm_requests_total.load(Ordering::Relaxed),
+            ),
+            (
+                "cortex_llm_tokens_consumed_total",
+                "LLM tokens consumed",
+                self.llm_tokens_consumed.load(Ordering::Relaxed),
+            ),
             // Ces deux derniers sont des sous-catégories du même nom avec labels
             // → traités en dehors du tableau ci-dessous
             ("_placeholder1", "", 0),
             ("_placeholder2", "", 0),
         ];
         for (name, help, value) in &counters {
-            if name.starts_with('_') { continue; }
+            if name.starts_with('_') {
+                continue;
+            }
             out.push_str(&format!("# HELP {} {}\n", name, help));
             out.push_str(&format!("# TYPE {} counter\n", name));
             out.push_str(&format!("{} {}\n", name, value));
@@ -356,30 +416,46 @@ impl Metrics {
 
         // ============ HISTOGRAMS (8) ============
         let histograms: [(&str, &str, &Histogram); 8] = [
-            ("cortex_intercept_plan_duration_seconds",
-             "Time spent in intercept_plan (Architect LLM call)",
-             &self.intercept_plan_duration),
-            ("cortex_pre_mortem_duration_seconds",
-             "Time spent in pre_mortem (PreMortem LLM call)",
-             &self.pre_mortem_duration),
-            ("cortex_red_team_audit_duration_seconds",
-             "Time spent in red_team_audit (5-layer audit)",
-             &self.red_team_audit_duration),
-            ("cortex_sync_reflect_duration_seconds",
-             "Time spent in sync_reflect (audit + WAL + actor)",
-             &self.sync_reflect_duration),
-            ("cortex_approve_and_execute_duration_seconds",
-             "Time spent in approve_and_execute (Kahn + dispatch)",
-             &self.approve_and_execute_duration),
-            ("cortex_recover_project_duration_seconds",
-             "Time spent in recover_project (WAL replay)",
-             &self.recover_project_duration),
-            ("cortex_harvest_insights_duration_seconds",
-             "Time spent in harvest_insights (InsightsHarvester LLM)",
-             &self.harvest_insights_duration),
-            ("cortex_llm_request_duration_seconds",
-             "Time spent in raw LLM API calls (provider-agnostic)",
-             &self.llm_request_duration),
+            (
+                "cortex_intercept_plan_duration_seconds",
+                "Time spent in intercept_plan (Architect LLM call)",
+                &self.intercept_plan_duration,
+            ),
+            (
+                "cortex_pre_mortem_duration_seconds",
+                "Time spent in pre_mortem (PreMortem LLM call)",
+                &self.pre_mortem_duration,
+            ),
+            (
+                "cortex_red_team_audit_duration_seconds",
+                "Time spent in red_team_audit (5-layer audit)",
+                &self.red_team_audit_duration,
+            ),
+            (
+                "cortex_sync_reflect_duration_seconds",
+                "Time spent in sync_reflect (audit + WAL + actor)",
+                &self.sync_reflect_duration,
+            ),
+            (
+                "cortex_approve_and_execute_duration_seconds",
+                "Time spent in approve_and_execute (Kahn + dispatch)",
+                &self.approve_and_execute_duration,
+            ),
+            (
+                "cortex_recover_project_duration_seconds",
+                "Time spent in recover_project (WAL replay)",
+                &self.recover_project_duration,
+            ),
+            (
+                "cortex_harvest_insights_duration_seconds",
+                "Time spent in harvest_insights (InsightsHarvester LLM)",
+                &self.harvest_insights_duration,
+            ),
+            (
+                "cortex_llm_request_duration_seconds",
+                "Time spent in raw LLM API calls (provider-agnostic)",
+                &self.llm_request_duration,
+            ),
         ];
         for (name, help, hist) in &histograms {
             out.push_str(&hist.snapshot().to_prometheus(name, help));
@@ -506,7 +582,9 @@ mod tests {
             assert!(
                 *c >= prev,
                 "bucket[le={}] should be >= previous ({} >= {})",
-                le, c, prev
+                le,
+                c,
+                prev
             );
             prev = *c;
         }
@@ -589,7 +667,8 @@ mod tests {
     #[test]
     fn test_metrics_prometheus_includes_histograms() {
         let m = Metrics::new();
-        m.intercept_plan_duration.observe(Duration::from_millis(100));
+        m.intercept_plan_duration
+            .observe(Duration::from_millis(100));
         m.pre_mortem_duration.observe(Duration::from_millis(50));
         let out = m.to_prometheus();
         // Vérif qu'on retrouve les 8 histogrammes dans la sortie

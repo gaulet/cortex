@@ -138,7 +138,11 @@ impl HttpLlmClient {
     /// - `api_key` : bearer token
     /// - `base_url` : ex `https://openrouter.ai/api/v1` ou `http://localhost:11434/v1`
     /// - `default_model` : utilisé si `LlmRequest.model` est None
-    pub fn new(api_key: impl Into<String>, base_url: impl Into<String>, default_model: impl Into<String>) -> Self {
+    pub fn new(
+        api_key: impl Into<String>,
+        base_url: impl Into<String>,
+        default_model: impl Into<String>,
+    ) -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
@@ -193,15 +197,19 @@ impl HttpLlmClient {
         });
 
         OpenAiRequest {
-            model: req.model.clone().unwrap_or_else(|| self.default_model.clone()),
+            model: req
+                .model
+                .clone()
+                .unwrap_or_else(|| self.default_model.clone()),
             messages,
             temperature: req.temperature,
             max_tokens: req.max_tokens,
-            reasoning: self.reasoning_effort.as_ref().map(|effort| {
-                OpenAiReasoning {
+            reasoning: self
+                .reasoning_effort
+                .as_ref()
+                .map(|effort| OpenAiReasoning {
                     effort: effort.clone(),
-                }
-            }),
+                }),
         }
     }
 
@@ -304,11 +312,7 @@ mod tests {
     use super::*;
 
     fn test_client() -> HttpLlmClient {
-        HttpLlmClient::new(
-            "sk-test-key",
-            "https://api.example.com/v1",
-            "gpt-4",
-        )
+        HttpLlmClient::new("sk-test-key", "https://api.example.com/v1", "gpt-4")
     }
 
     #[test]

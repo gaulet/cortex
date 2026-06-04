@@ -53,13 +53,11 @@ impl ProjectState {
     pub fn new(project_id: String) -> Self {
         // Le scratchpad peut échouer si project_id est vide (ce qui n'est pas
         // notre cas ici). Si ça échoue, on log et on met un stub.
-        let scratchpad =
-            Scratchpad::new(project_id.clone(), String::new(), String::new()).unwrap_or_else(
-                |_| Scratchpad {
-                    project_id: project_id.clone(),
-                    ..Default::default()
-                },
-            );
+        let scratchpad = Scratchpad::new(project_id.clone(), String::new(), String::new())
+            .unwrap_or_else(|_| Scratchpad {
+                project_id: project_id.clone(),
+                ..Default::default()
+            });
 
         Self {
             project_id,

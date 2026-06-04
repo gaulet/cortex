@@ -263,10 +263,7 @@ async fn handle_tools_call<C: LlmClient + Clone>(
             data: None,
         })?;
 
-    let arguments = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or(json!({}));
+    let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
     match tool_name {
         "get_routing_rules" => handle_get_routing_rules(server).await,
@@ -343,11 +340,14 @@ async fn handle_intercept_plan<C: LlmClient + Clone>(
         project_id,
     };
 
-    let response = server.intercept_plan(request).await.map_err(|e| JsonRpcError {
-        code: crate::protocol::INTERNAL_ERROR,
-        message: format!("intercept_plan failed: {}", e),
-        data: None,
-    })?;
+    let response = server
+        .intercept_plan(request)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: crate::protocol::INTERNAL_ERROR,
+            message: format!("intercept_plan failed: {}", e),
+            data: None,
+        })?;
 
     let content = serde_json::to_value(&response).map_err(|e| JsonRpcError {
         code: crate::protocol::INTERNAL_ERROR,
@@ -406,21 +406,20 @@ async fn handle_recover_project<C: LlmClient + Clone>(
     server: &CortexServer<C>,
     arguments: JsonValue,
 ) -> DispatchResult {
-    let request =
-        serde_json::from_value::<crate::server::RecoverProjectRequest>(arguments).map_err(
-            |e| JsonRpcError {
-                code: INVALID_PARAMS,
-                message: format!("Invalid params for recover_project: {}", e),
-                data: None,
-            },
-        )?;
-    let response = server.recover_project(request).await.map_err(|e| {
-        JsonRpcError {
+    let request = serde_json::from_value::<crate::server::RecoverProjectRequest>(arguments)
+        .map_err(|e| JsonRpcError {
+            code: INVALID_PARAMS,
+            message: format!("Invalid params for recover_project: {}", e),
+            data: None,
+        })?;
+    let response = server
+        .recover_project(request)
+        .await
+        .map_err(|e| JsonRpcError {
             code: crate::protocol::INTERNAL_ERROR,
             message: format!("recover_project failed: {}", e),
             data: None,
-        }
-    })?;
+        })?;
     tool_response(response)
 }
 
@@ -435,12 +434,13 @@ async fn handle_red_team_audit<C: LlmClient + Clone>(
     arguments: JsonValue,
 ) -> DispatchResult {
     let request =
-        serde_json::from_value::<crate::server::RedTeamAuditRequest>(arguments)
-            .map_err(|e| JsonRpcError {
+        serde_json::from_value::<crate::server::RedTeamAuditRequest>(arguments).map_err(|e| {
+            JsonRpcError {
                 code: INVALID_PARAMS,
                 message: format!("Invalid params for red_team_audit: {}", e),
                 data: None,
-            })?;
+            }
+        })?;
 
     let response = server
         .red_team_audit(request)
@@ -468,13 +468,12 @@ async fn handle_harvest_insights<C: LlmClient + Clone>(
     server: &CortexServer<C>,
     arguments: JsonValue,
 ) -> DispatchResult {
-    let request =
-        serde_json::from_value::<crate::server::HarvestInsightsRequest>(arguments)
-            .map_err(|e| JsonRpcError {
-                code: INVALID_PARAMS,
-                message: format!("Invalid params for harvest_insights: {}", e),
-                data: None,
-            })?;
+    let request = serde_json::from_value::<crate::server::HarvestInsightsRequest>(arguments)
+        .map_err(|e| JsonRpcError {
+            code: INVALID_PARAMS,
+            message: format!("Invalid params for harvest_insights: {}", e),
+            data: None,
+        })?;
 
     let response = server
         .harvest_insights(request)
@@ -524,13 +523,14 @@ async fn handle_approve_and_execute<C: LlmClient + Clone>(
             message: format!("Invalid params for approve_and_execute: {}", e),
             data: None,
         })?;
-    let response = server.approve_and_execute(request).await.map_err(|e| {
-        JsonRpcError {
+    let response = server
+        .approve_and_execute(request)
+        .await
+        .map_err(|e| JsonRpcError {
             code: crate::protocol::INTERNAL_ERROR,
             message: format!("approve_and_execute failed: {}", e),
             data: None,
-        }
-    })?;
+        })?;
     tool_response(response)
 }
 
@@ -538,17 +538,22 @@ async fn handle_sync_reflect<C: LlmClient + Clone>(
     server: &CortexServer<C>,
     arguments: JsonValue,
 ) -> DispatchResult {
-    let request = serde_json::from_value::<crate::server::SyncReflectRequest>(arguments)
+    let request =
+        serde_json::from_value::<crate::server::SyncReflectRequest>(arguments).map_err(|e| {
+            JsonRpcError {
+                code: INVALID_PARAMS,
+                message: format!("Invalid params for sync_reflect: {}", e),
+                data: None,
+            }
+        })?;
+    let response = server
+        .sync_reflect(request)
+        .await
         .map_err(|e| JsonRpcError {
-            code: INVALID_PARAMS,
-            message: format!("Invalid params for sync_reflect: {}", e),
+            code: crate::protocol::INTERNAL_ERROR,
+            message: format!("sync_reflect failed: {}", e),
             data: None,
         })?;
-    let response = server.sync_reflect(request).await.map_err(|e| JsonRpcError {
-        code: crate::protocol::INTERNAL_ERROR,
-        message: format!("sync_reflect failed: {}", e),
-        data: None,
-    })?;
     tool_response(response)
 }
 
@@ -562,13 +567,14 @@ async fn handle_check_jobs_status<C: LlmClient + Clone>(
             message: format!("Invalid params for check_jobs_status: {}", e),
             data: None,
         })?;
-    let response = server.check_jobs_status(request).await.map_err(|e| {
-        JsonRpcError {
+    let response = server
+        .check_jobs_status(request)
+        .await
+        .map_err(|e| JsonRpcError {
             code: crate::protocol::INTERNAL_ERROR,
             message: format!("check_jobs_status failed: {}", e),
             data: None,
-        }
-    })?;
+        })?;
     tool_response(response)
 }
 
@@ -576,11 +582,13 @@ async fn handle_rollback<C: LlmClient + Clone>(
     server: &CortexServer<C>,
     arguments: JsonValue,
 ) -> DispatchResult {
-    let request = serde_json::from_value::<crate::server::RollbackRequest>(arguments)
-        .map_err(|e| JsonRpcError {
-            code: INVALID_PARAMS,
-            message: format!("Invalid params for rollback: {}", e),
-            data: None,
+    let request =
+        serde_json::from_value::<crate::server::RollbackRequest>(arguments).map_err(|e| {
+            JsonRpcError {
+                code: INVALID_PARAMS,
+                message: format!("Invalid params for rollback: {}", e),
+                data: None,
+            }
         })?;
     let response = server.rollback(request).await.map_err(|e| JsonRpcError {
         code: crate::protocol::INTERNAL_ERROR,
@@ -690,7 +698,10 @@ mod tests {
         let text = content[0]["text"].as_str().expect("should be string");
         let parsed: JsonValue = serde_json::from_str(text).expect("should parse");
 
-        assert!(parsed["project_id"].as_str().unwrap().starts_with("project-"));
+        assert!(parsed["project_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("project-"));
         assert_eq!(parsed["plan"]["themes"].as_array().unwrap().len(), 1);
         assert_eq!(parsed["requires_user_approval"], true);
     }

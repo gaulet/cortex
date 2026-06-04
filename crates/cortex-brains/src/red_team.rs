@@ -98,13 +98,12 @@ impl<C: LlmClient> RedTeam<C> {
                     "guardrails": guardrails,
                     "definition_of_done": definition_of_done,
                 });
-                cortex_security::verify_guardrails(secret, &payload, expected)
-                    .map_err(|e| {
-                        RedTeamError::MissingField(format!(
-                            "HMAC verification failed: {} — guardrails may have been tampered with",
-                            e
-                        ))
-                    })
+                cortex_security::verify_guardrails(secret, &payload, expected).map_err(|e| {
+                    RedTeamError::MissingField(format!(
+                        "HMAC verification failed: {} — guardrails may have been tampered with",
+                        e
+                    ))
+                })
             }
             (None, Some(_)) => {
                 tracing::warn!(
@@ -316,9 +315,8 @@ fn parse_json<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, RedTeamEr
         ));
     }
 
-    serde_json::from_str::<T>(&text[start..=end]).map_err(|e| {
-        RedTeamError::ResponseParsingFailed(format!("JSON parse: {}", e))
-    })
+    serde_json::from_str::<T>(&text[start..=end])
+        .map_err(|e| RedTeamError::ResponseParsingFailed(format!("JSON parse: {}", e)))
 }
 
 fn validate_audit_result(result: &RedTeamResult) -> Result<(), RedTeamError> {
@@ -358,13 +356,8 @@ mod tests {
 
     #[test]
     fn test_verify_hmac_no_secret_no_sig_ok() {
-        let result = RedTeam::<MockLlmClient>::verify_hmac(
-            "J-1",
-            &sample_guardrails(),
-            "DoD",
-            None,
-            None,
-        );
+        let result =
+            RedTeam::<MockLlmClient>::verify_hmac("J-1", &sample_guardrails(), "DoD", None, None);
         assert!(result.is_ok());
     }
 
@@ -590,13 +583,8 @@ mod tests {
 
     #[test]
     fn test_user_prompt_contains_guardrails() {
-        let prompt = build_user_prompt(
-            "J-1",
-            "DoD",
-            None,
-            &sample_guardrails(),
-            "artifact content",
-        );
+        let prompt =
+            build_user_prompt("J-1", "DoD", None, &sample_guardrails(), "artifact content");
         assert!(prompt.contains("G-1.1"));
         assert!(prompt.contains("G-1.2"));
         assert!(prompt.contains("check: test -f file.txt"));

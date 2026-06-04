@@ -24,8 +24,16 @@ impl CostGating {
 
     /// Estimated total tokens per job based on criticity.
     pub fn estimate_tokens(criticity: u8) -> u32 {
-        let pre_mortem = if Self::should_run_pre_mortem(criticity) { 1500 } else { 0 };
-        let red_team = if Self::should_run_red_team(criticity) { 2500 } else { 0 };
+        let pre_mortem = if Self::should_run_pre_mortem(criticity) {
+            1500
+        } else {
+            0
+        };
+        let red_team = if Self::should_run_red_team(criticity) {
+            2500
+        } else {
+            0
+        };
         pre_mortem + red_team
     }
 
