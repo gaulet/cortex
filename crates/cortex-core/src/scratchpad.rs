@@ -94,6 +94,31 @@ impl Scratchpad {
     }
 }
 
+impl Default for Scratchpad {
+    fn default() -> Self {
+        // Note: this is mostly a stub — real usage should call `Scratchpad::new`.
+        // The `default_for` helper is not provided because each scratchpad
+        // should have a real project_id at construction time.
+        Self {
+            scratchpad_id: format!("scratchpad_{}", Uuid::now_v7()),
+            project_id: String::new(),
+            project_name: String::new(),
+            created_at: Utc::now(),
+            last_updated: Utc::now(),
+            current_commit: format!("commit_{}", Uuid::now_v7()),
+            status: ScratchpadStatus::Active,
+            objective: String::new(),
+            handoff_summary: None,
+            themes: HashMap::new(),
+            jobs: HashMap::new(),
+            milestones: Vec::new(),
+            parking_lot: Vec::new(),
+            ignored_noise: Vec::new(),
+            wal_log: Vec::new(),
+        }
+    }
+}
+
 /// Lifecycle status of a scratchpad.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScratchpadStatus {

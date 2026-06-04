@@ -39,7 +39,8 @@ impl ActorRegistry {
             project_name.to_string(),
             objective.to_string(),
         )?;
-        let handle = ProjectActor::spawn(project_id.to_string(), scratchpad);
+        let handle =
+            ProjectActor::spawn_from_scratchpad(project_id.to_string(), scratchpad);
         self.actors.insert(project_id.to_string(), handle.clone());
         Ok(handle)
     }

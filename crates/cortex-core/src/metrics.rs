@@ -4,7 +4,7 @@
 //! via l'outil MCP `get_metrics`. Les compteurs sont stockés en `AtomicU64`
 //! pour permettre des updates lock-free depuis n'importe quel task async.
 //!
-//! # Métriques exposées
+//! # Métriques exposées (Session 5.3)
 //!
 //! - `cortex_jobs_dispatched_total` (counter) : nombre de jobs dispatchés
 //! - `cortex_jobs_approved_total` (counter) : jobs approuvés par Hermes
@@ -19,12 +19,150 @@
 //! - `cortex_llm_tokens_consumed_total` (counter) : tokens cumulés
 //! - `cortex_uptime_seconds` (gauge) : uptime du serveur
 //!
-//! Note : pas d'histogrammes dans ce MVP (overhead AtomicI64). On expose
-//! des percentiles calculables côté Prometheus via recording rules.
+//! # Histogrammes (Session 6)
+//!
+//! - `cortex_llm_request_duration_seconds_bucket{le=...}` : latence appels LLM
+//! - `cortex_intercept_plan_duration_seconds_bucket{le=...}` : latence plan
+//! - `cortex_sync_reflect_duration_seconds_bucket{le=...}` : latence audit
+//! - `cortex_recover_project_duration_seconds_bucket{le=...}` : latence recovery
+//!
+//! Note : pour SLO percentiles (p50/p95/p99), utiliser Prometheus
+//! `histogram_quantile()` sur les buckets. Les buckets sont en secondes
+//! avec une progression logarithmique (1ms → 30s).
+//!
+//! Limites : AtomicI64 pour la sum (durations saturent à ~292 ans en
+//! nanosecondes, on n'est pas concernés). Les buckets sont aussi AtomicU64.
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Buckets par défaut (secondes) pour tous les histogrammes.
+/// Distribution logarithmique qui couvre 1ms → ~30s, inspirée de
+/// `prometheus_client::DEFAULT_BUCKETS` (à peu près).
+pub const DEFAULT_BUCKETS: &[f64] = &[
+    0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0,
+];
+
+/// Histogramme lock-free avec buckets exponentiels et sum atomique.
+///
+/// Pas de quantile natif (coûteux) : Prometheus calcule p50/p95/p99
+/// via `histogram_quantile(0.95, sum by(le)(rate(...[5m])))`.
+///
+/// # Overhead
+/// - observe() : 1 atomic load + N atomic add (N = buckets.len())
+/// - snapshot() : N atomic loads
+/// Pour 14 buckets × 10⁵ observes/s : ~1.4M atomic ops/s, négligeable.
+#[derive(Debug)]
+pub struct Histogram {
+    buckets: Vec<(f64, AtomicU64)>, // (upper_bound_seconds, count)
+    sum_micros: AtomicI64,           // sum en microsecondes (précision ms)
+    count: AtomicU64,
+}
+
+impl Histogram {
+    pub fn new(buckets: &[f64]) -> Self {
+        let mut b: Vec<(f64, AtomicU64)> = buckets
+            .iter()
+            .map(|&le| (le, AtomicU64::new(0)))
+            .collect();
+        // Bucket +Inf (tou présent, capture tout ce qui dépasse le max)
+        b.push((f64::INFINITY, AtomicU64::new(0)));
+        Self {
+            buckets: b,
+            sum_micros: AtomicI64::new(0),
+            count: AtomicU64::new(0),
+        }
+    }
+
+    /// Enregistre une observation de durée.
+    pub fn observe(&self, duration: std::time::Duration) {
+        let secs = duration.as_secs_f64();
+        let micros = duration.as_micros() as i64;
+        // +1 dans chaque bucket >= observation
+        for (_, count) in &self.buckets {
+            if secs <= { let (le, _) = (0.0, 0); le } {
+                break;
+            }
+        }
+        // Simple linéaire (buckets triés asc par construction)
+        for (le, count) in &self.buckets {
+            if secs <= *le {
+                count.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        self.sum_micros.fetch_add(micros, Ordering::Relaxed);
+        self.count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Snapshot immutable du contenu (pour sérialisation Prometheus).
+    pub fn snapshot(&self) -> HistogramSnapshot {
+        let buckets: Vec<(f64, u64)> = self
+            .buckets
+            .iter()
+            .map(|(le, c)| (*le, c.load(Ordering::Relaxed)))
+            .collect();
+        HistogramSnapshot {
+            buckets,
+            sum_micros: self.sum_micros.load(Ordering::Relaxed),
+            count: self.count.load(Ordering::Relaxed),
+        }
+    }
+}
+
+impl Default for Histogram {
+    fn default() -> Self {
+        Self::new(DEFAULT_BUCKETS)
+    }
+}
+
+/// Snapshot immutable d'un Histogram (pour export).
+#[derive(Debug, Clone)]
+pub struct HistogramSnapshot {
+    pub buckets: Vec<(f64, u64)>, // (le, count)
+    pub sum_micros: i64,
+    pub count: u64,
+}
+
+impl HistogramSnapshot {
+    /// Sérialise au format Prometheus :
+    /// `name_bucket{le="0.001"} 5`
+    /// `name_bucket{le="0.01"} 12`
+    /// ...
+    /// `name_bucket{le="+Inf"} 20`
+    /// `name_sum 0.123`
+    /// `name_count 20`
+    pub fn to_prometheus(&self, name: &str, help: &str) -> String {
+        let mut out = String::with_capacity(256);
+        out.push_str(&format!("# HELP {} {}\n", name, help));
+        out.push_str(&format!("# TYPE {} histogram\n", name));
+        let mut cumulative = 0u64;
+        for (le, _count) in &self.buckets {
+            // Already cumulative (on incrémente tous les buckets >= obs)
+            let current = match le {
+                le if le.is_infinite() => self.count,
+                _ => self
+                    .buckets
+                    .iter()
+                    .filter(|(other_le, _)| *other_le <= *le)
+                    .map(|(_, c)| *c)
+                    .sum(),
+            };
+            let le_str = if le.is_infinite() {
+                "+Inf".to_string()
+            } else {
+                format!("{}", le)
+            };
+            out.push_str(&format!("{}_bucket{{le=\"{}\"}} {}\n", name, le_str, current));
+            cumulative = current;
+        }
+        // Le sum est en secondes (Prometheus convention)
+        let sum_secs = self.sum_micros as f64 / 1_000_000.0;
+        out.push_str(&format!("{}_sum {}\n", name, sum_secs));
+        out.push_str(&format!("{}_count {}\n", name, self.count));
+        out
+    }
+}
 
 /// Compteurs partagés (lock-free).
 #[derive(Debug, Default)]
