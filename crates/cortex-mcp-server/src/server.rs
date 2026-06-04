@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use cortex_brains::{Architect, FractalPlan, LlmClient};
-use cortex_core::{RecoveryReport, RoutingRules, SharedMetrics, WalService};
+use cortex_core::{metrics::HistogramExt, RecoveryReport, RoutingRules, SharedMetrics, WalService};
 use cortex_actors::{ActorRegistry, ProjectActorHandle, JobResult, AuditRecord};
 
 use serde::{Deserialize, Serialize};
@@ -433,6 +433,10 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         &self,
         request: InterceptPlanRequest,
     ) -> Result<InterceptPlanResponse, CortexServerError> {
+        // Session 6 (option A) : démarre le timer pour histogramme Prometheus.
+        // Le timer observe automatiquement la durée à la drop (RAII).
+        let _timer = self.metrics.intercept_plan_duration.start_timer();
+
         // 1. Détermine project_id (nouveau ou réutilise)
         let project_id = match request.project_id {
             Some(id) => id,
@@ -517,6 +521,7 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         &self,
         request: PreMortemRequest,
     ) -> Result<PreMortemResponse, CortexServerError> {
+        let _timer = self.metrics.pre_mortem_duration.start_timer();
         let brain = cortex_brains::PreMortem::new(self.llm_client.clone());
         self.metrics.inc_llm_requests();
         let result = brain
@@ -544,6 +549,7 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         &self,
         request: RedTeamAuditRequest,
     ) -> Result<RedTeamAuditResponse, CortexServerError> {
+        let _timer = self.metrics.red_team_audit_duration.start_timer();
         // Couche 1 : HMAC integrity (non-LLM, fast).
         // On appelle directement cortex_security::verify_guardrails pour éviter
         // le type inference problem de `RedTeam::<C>::verify_hmac` (C non utilisé).
@@ -606,11 +612,12 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         })
     }
 
-    /// Outil `harvest_insights` : extrait patterns/leçons d'un thème complété.
+    /// Outil `harvest_insights` : extrait patterns réutilisables d'un thème complété.
     pub async fn harvest_insights(
         &self,
         request: HarvestInsightsRequest,
     ) -> Result<HarvestInsightsResponse, CortexServerError> {
+        let _timer = self.metrics.harvest_insights_duration.start_timer();
         let brain = cortex_brains::InsightsHarvester::new(self.llm_client.clone());
         let insights = brain
             .harvest(
@@ -634,6 +641,9 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         &self,
         request: ApproveAndExecuteRequest,
     ) -> Result<ApproveAndExecuteResponse, CortexServerError> {
+        // Session 6 (option A) : démarre le timer pour histogramme Prometheus.
+        let _timer = self.metrics.approve_and_execute_duration.start_timer();
+
         // 1. Récupère le plan (depuis la requête ou depuis le state cache)
         let plan = if let Some(p) = request.plan {
             p
@@ -738,6 +748,7 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         &self,
         request: SyncReflectRequest,
     ) -> Result<SyncReflectResponse, CortexServerError> {
+        let _timer = self.metrics.sync_reflect_duration.start_timer();
         // 0. Session 6 (option C) : get-or-spawn l'actor et check aborted
         let actor = self.get_or_spawn_actor(&request.project_id).await?;
         if actor.is_aborted().await.unwrap_or(false) {
@@ -1021,6 +1032,7 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         &self,
         request: RecoverProjectRequest,
     ) -> Result<cortex_core::RecoveryReport, CortexServerError> {
+        let _timer = self.metrics.recover_project_duration.start_timer();
         let report = self
             .wal
             .recover_uncommitted(&request.project_id)
@@ -1259,6 +1271,7 @@ mod tests {
     use super::*;
     use cortex_brains::MockLlmClient;
     use cortex_core::WalService as TestedWalService;
+    use std::time::Duration;
 
     const VALID_PLAN_JSON: &str = r#"{
         "themes": [
@@ -1655,5 +1668,73 @@ mod tests {
             "intercept_plan should fail on aborted project, got {:?}",
             r2
         );
+    }
+
+    // ============================================================
+    // Session 6 (option A) : tests histogram instrumentation
+    // ============================================================
+
+    #[tokio::test]
+    async fn test_histogram_incremented_on_intercept_plan() {
+        // Vérifie qu'un appel intercept_plan incrémente bien l'histogramme.
+        let server = make_test_server().await;
+
+        // Avant : count = 0
+        let snap_before = server.metrics.intercept_plan_duration.snapshot();
+        assert_eq!(snap_before.count, 0, "histogram should start at 0");
+
+        // 1 appel
+        server
+            .intercept_plan(InterceptPlanRequest {
+                project_id: Some("histogram-test".into()),
+                intent: "X".into(),
+                context: "Y".into(),
+            })
+            .await
+            .expect("plan");
+
+        // Après : count = 1
+        let snap_after = server.metrics.intercept_plan_duration.snapshot();
+        assert_eq!(snap_after.count, 1, "histogram should have 1 observation");
+        assert!(snap_after.sum_micros > 0, "duration should be > 0");
+    }
+
+    #[tokio::test]
+    async fn test_histogram_prometheus_format_includes_all_8() {
+        // Vérifie que le format Prometheus contient bien les 8 histogrammes.
+        let server = make_test_server().await;
+        // On observe chaque histogramme une fois
+        server.metrics.intercept_plan_duration.observe(Duration::from_millis(10));
+        server.metrics.pre_mortem_duration.observe(Duration::from_millis(20));
+        server.metrics.red_team_audit_duration.observe(Duration::from_millis(30));
+        server.metrics.sync_reflect_duration.observe(Duration::from_millis(40));
+        server.metrics.approve_and_execute_duration.observe(Duration::from_millis(50));
+        server.metrics.recover_project_duration.observe(Duration::from_millis(60));
+        server.metrics.harvest_insights_duration.observe(Duration::from_millis(70));
+        server.metrics.llm_request_duration.observe(Duration::from_millis(80));
+
+        let out = server.get_metrics_prometheus();
+        // Vérif que les 8 histogrammes sont présents
+        for name in [
+            "cortex_intercept_plan_duration_seconds",
+            "cortex_pre_mortem_duration_seconds",
+            "cortex_red_team_audit_duration_seconds",
+            "cortex_sync_reflect_duration_seconds",
+            "cortex_approve_and_execute_duration_seconds",
+            "cortex_recover_project_duration_seconds",
+            "cortex_harvest_insights_duration_seconds",
+            "cortex_llm_request_duration_seconds",
+        ] {
+            assert!(
+                out.contains(&format!("# TYPE {} histogram", name)),
+                "missing histogram {} in output",
+                name
+            );
+            assert!(
+                out.contains(&format!("{}_count 1", name)),
+                "missing count for {} in output",
+                name
+            );
+        }
     }
 }
