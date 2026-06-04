@@ -78,8 +78,6 @@ cortex-core (WAL dual backend SQLite/PG, Metrics, Routing, Scratchpad)
     ↓
 cortex-security (HMAC-SHA256 anti-tampering)
     ↓
-cortex-security (HMAC-SHA256 anti-tampering)
-    ↓
 cortex-webhooks (HTTP notifications on critical events)
 ```
 
