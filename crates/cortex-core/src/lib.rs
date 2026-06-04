@@ -15,9 +15,11 @@
 pub mod context;
 pub mod error;
 pub mod graph;
+pub mod routing;
 pub mod scratchpad;
 pub mod wal;
 
 pub use context::*;
 pub use error::*;
+pub use routing::RoutingRules;
 pub use scratchpad::*;
