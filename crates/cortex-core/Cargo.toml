@@ -6,6 +6,14 @@ authors.workspace = true
 license.workspace = true
 description = "Core domain model for Cortex MCP"
 
+[features]
+# Backend par défaut : SQLite (léger, parfait pour tests et mode embedded).
+# Les deux backends sont mutuellement exclusifs.
+# Pour utiliser Postgres : `cargo build --no-default-features --features postgres`.
+default = ["sqlite"]
+sqlite = ["sqlx/sqlite"]
+postgres = ["sqlx/postgres"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

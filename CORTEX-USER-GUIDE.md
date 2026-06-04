@@ -49,7 +49,7 @@ Toutes les variables sont préfixées par `CORTEX_`. Aucune n'est obligatoire : 
 
 | Variable | Default | Description |
 |---|---|---|
-| `CORTEX_WAL_URL` | `sqlite::memory:` | URL SQLite pour la persistance WAL. Recommandé : `sqlite://C:\Users\nivra\AppData\Local\cortex\cortex.db?mode=rwc` (Windows) ou `sqlite:///var/lib/cortex/cortex.db?mode=rwc` (Linux) |
+| `CORTEX_WAL_URL` | `sqlite::memory:` | URL de la base WAL. **SQLite** (défaut) : `sqlite://chemin/vers/db?mode=rwc` ou `sqlite::memory:`. **PostgreSQL** (feature requise) : `postgres://user:pass@host:5432/dbname` (ex : `postgres://cortex:***@localhost:5432/cortex`). Le backend est détecté automatiquement depuis le préfixe. |
 | `CORTEX_LLM_PROVIDER` | `mock` | `mock` (tests) ou `openai` (compatible OpenAI) |
 | `CORTEX_LLM_API_KEY` | — | Clé API LLM. **Requis si provider=openai** |
 | `CORTEX_LLM_BASE_URL` | `https://api.openai.com/v1` | URL de base. Pour OpenRouter : `https://openrouter.ai/api/v1`. Pour ollama local : `http://localhost:11434/v1` |
@@ -630,9 +630,25 @@ cortex-mcp/
 ## 11. Limites connues
 
 - **Historique LLM** : Cortex n'envoie pas l'historique de conversation à l'LLM. Chaque appel est stateless. Le contexte est porté par le `Scratchpad` et passé explicitement.
-- **Concurrence** : SQLite WAL supporte plusieurs readers + 1 writer. Pour >1 writer simultané, migrer vers PostgreSQL.
-- **Métriques** : 13 compteurs lock-free, mais pas d'histogrammes (overhead). Les percentiles doivent être calculés via Prometheus recording rules.
+- **Backend WAL** : Le **binaire** `cortex-mcp` est compilé en mode SQLite par défaut. Le **support PostgreSQL** est disponible dans la **lib `cortex-core`** via la feature `--features cortex-core/postgres` (build : `cargo build --no-default-features --features cortex-core/postgres`). Les autres crates (cortex-actors, cortex-brains, cortex-mcp-server) peuvent être migrées dans une session dédiée.
+- **Concurrence** : SQLite WAL supporte plusieurs readers + 1 writer. Pour >1 writer simultané ou scale multi-host, migrer vers PostgreSQL (qui supporte JSONB natif, jusqu'à 100+ connexions concurrentes).
+- **Métriques** : 13 compteurs lock-free + 8 histogrammes (Session 6). Compatible Prometheus.
 - **Transport MCP** : `stdio` uniquement (pas de `sse` / `http`). Si besoin d'un transport réseau, reverse-proxy via `mcp-proxy`.
+
+### Backends WAL supportés (Session 6 option E)
+
+| Backend | Activation | Cas d'usage | Schéma JSON |
+|---|---|---|---|
+| **SQLite** (défaut) | aucune feature | Local, tests, mode embedded, single-writer | `TEXT` |
+| **PostgreSQL** | `--features cortex-core/postgres` | Prod multi-host, haute concurrence, scale | `JSONB` (natif) |
+
+Pour activer PostgreSQL dans une lib downstream :
+```toml
+# Cargo.toml
+cortex-core = { path = "../cortex-core", default-features = false, features = ["postgres"] }
+```
+
+Puis : `CORTEX_WAL_URL=postgres://user:pass@host:5432/cortex_db`
 
 ---
 
