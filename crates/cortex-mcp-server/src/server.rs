@@ -648,6 +648,11 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         &self,
         request: RedTeamAuditRequest,
     ) -> Result<RedTeamAuditResponse, CortexServerError> {
+        // Session 7 hardening : validation centralisée.
+        self.validate_non_empty("job_id", &request.job_id)?;
+        self.validate_non_empty("definition_of_done", &request.definition_of_done)?;
+        self.validate_non_empty("artifact", &request.artifact)?;
+
         let _timer = self.metrics.red_team_audit_duration.start_timer();
         // Couche 1 : HMAC integrity (non-LLM, fast).
         // On appelle directement cortex_security::verify_guardrails pour éviter
@@ -734,6 +739,11 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         &self,
         request: HarvestInsightsRequest,
     ) -> Result<HarvestInsightsResponse, CortexServerError> {
+        // Session 7 hardening : validation centralisée.
+        self.validate_non_empty("theme_id", &request.theme_id)?;
+        self.validate_non_empty("theme_name", &request.theme_name)?;
+        self.validate_non_empty("jobs_summary", &request.jobs_summary)?;
+
         let _timer = self.metrics.harvest_insights_duration.start_timer();
         let brain = cortex_brains::InsightsHarvester::new(self.llm_client.clone());
         let insights = brain
@@ -758,6 +768,10 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         &self,
         request: ApproveAndExecuteRequest,
     ) -> Result<ApproveAndExecuteResponse, CortexServerError> {
+        // Session 7 hardening : validation centralisée.
+        self.validate_non_empty("project_id", &request.project_id)?;
+        self.validate_non_empty("approved_by", &request.approved_by)?;
+
         // Session 6 (option A) : démarre le timer pour histogramme Prometheus.
         let _timer = self.metrics.approve_and_execute_duration.start_timer();
 
@@ -984,6 +998,9 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         &self,
         request: CheckJobsStatusRequest,
     ) -> Result<CheckJobsStatusResponse, CortexServerError> {
+        // Session 7 hardening : validation centralisée.
+        self.validate_non_empty("project_id", &request.project_id)?;
+
         // 1. List commits (project history)
         let commits = self
             .wal
@@ -1047,6 +1064,10 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         &self,
         request: RollbackRequest,
     ) -> Result<RollbackResponse, CortexServerError> {
+        // Session 7 hardening : validation centralisée.
+        self.validate_non_empty("project_id", &request.project_id)?;
+        self.validate_non_empty("reason", &request.reason)?;
+
         let commits = self
             .wal
             .list_commits(&request.project_id)
@@ -1184,6 +1205,8 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         &self,
         request: RecoverProjectRequest,
     ) -> Result<cortex_core::RecoveryReport, CortexServerError> {
+        // Session 7 hardening : validation centralisée.
+        self.validate_non_empty("project_id", &request.project_id)?;
         let _timer = self.metrics.recover_project_duration.start_timer();
         let report = self
             .wal
