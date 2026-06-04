@@ -36,7 +36,7 @@ pub type DispatchResult = Result<JsonValue, JsonRpcError>;
 ///
 /// Retourne `Some(DispatchResult)` si la méthode doit renvoyer une réponse,
 /// ou `None` si c'est une notification (silence).
-pub async fn dispatch<C: LlmClient>(
+pub async fn dispatch<C: LlmClient + Clone>(
     server: &CortexServer<C>,
     method: &str,
     params: Option<JsonValue>,
@@ -102,28 +102,62 @@ fn handle_tools_list() -> DispatchResult {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "intent": {
-                        "type": "string",
-                        "description": "Raw user intent (free text)"
-                    },
-                    "context": {
-                        "type": "string",
-                        "description": "Additional context (constraints, history, etc.)"
-                    },
-                    "project_id": {
-                        "type": "string",
-                        "description": "Optional. Existing project ID, or omit to create new project."
-                    }
+                    "intent": {"type": "string", "description": "Raw user intent (free text)"},
+                    "context": {"type": "string", "description": "Additional context (constraints, history, etc.)"},
+                    "project_id": {"type": "string", "description": "Optional. Existing project ID, or omit to create new project."}
                 },
                 "required": ["intent"]
             }
-        })
+        }),
+        json!({
+            "name": "pre_mortem",
+            "description": "Generates executable guardrails for a high-criticality job (criticity ≥ 4). Uses the Pre-Mortem brain to anticipate F1-F19 failure modes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string", "description": "ID of the job"},
+                    "job_description": {"type": "string", "description": "What the job should do"},
+                    "definition_of_done": {"type": "string", "description": "Binary verifiable success criteria"},
+                    "context": {"type": "string", "description": "Environment, constraints"}
+                },
+                "required": ["job_id", "job_description", "definition_of_done"]
+            }
+        }),
+        json!({
+            "name": "red_team_audit",
+            "description": "Adversarial audit of a worker-produced artifact across 5 layers (HMAC, DoD, guardrails, convergence, edge cases).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string"},
+                    "definition_of_done": {"type": "string"},
+                    "convergence_contract": {"type": "string"},
+                    "guardrails": {"type": "array", "items": {"type": "object"}},
+                    "artifact": {"type": "string", "description": "Content of the produced artifact"}
+                },
+                "required": ["job_id", "definition_of_done", "artifact"]
+            }
+        }),
+        json!({
+            "name": "harvest_insights",
+            "description": "Extracts reusable patterns and lessons learned from a completed theme. Enriches cross-project knowledge base.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "theme_id": {"type": "string"},
+                    "theme_name": {"type": "string"},
+                    "jobs_summary": {"type": "string"},
+                    "metrics": {"type": "object", "description": "Optional theme metrics (total_jobs, retries, etc.)"}
+                },
+                "required": ["theme_id", "theme_name", "jobs_summary"]
+            }
+        }),
     ];
     Ok(json!({"tools": tools}))
 }
 
 /// Dispatch un appel d'outil vers CortexServer.
-async fn handle_tools_call<C: LlmClient>(
+async fn handle_tools_call<C: LlmClient + Clone>(
     server: &CortexServer<C>,
     params: Option<JsonValue>,
 ) -> DispatchResult {
@@ -155,6 +189,9 @@ async fn handle_tools_call<C: LlmClient>(
     match tool_name {
         "get_routing_rules" => handle_get_routing_rules(server).await,
         "intercept_plan" => handle_intercept_plan(server, arguments).await,
+        "pre_mortem" => handle_pre_mortem(server, arguments).await,
+        "red_team_audit" => handle_red_team_audit(server, arguments).await,
+        "harvest_insights" => handle_harvest_insights(server, arguments).await,
         _ => Err(JsonRpcError {
             code: METHOD_NOT_FOUND,
             message: format!("Unknown tool: {}", tool_name),
@@ -164,7 +201,7 @@ async fn handle_tools_call<C: LlmClient>(
 }
 
 /// Handler get_routing_rules : retourne les règles pour Hermes.
-async fn handle_get_routing_rules<C: LlmClient>(
+async fn handle_get_routing_rules<C: LlmClient + Clone>(
     server: &CortexServer<C>,
 ) -> DispatchResult {
     let resp = server.get_routing_rules().await.map_err(|e| JsonRpcError {
@@ -186,7 +223,7 @@ async fn handle_get_routing_rules<C: LlmClient>(
 }
 
 /// Handler intercept_plan : génère un plan fractal.
-async fn handle_intercept_plan<C: LlmClient>(
+async fn handle_intercept_plan<C: LlmClient + Clone>(
     server: &CortexServer<C>,
     arguments: JsonValue,
 ) -> DispatchResult {
@@ -235,6 +272,105 @@ async fn handle_intercept_plan<C: LlmClient>(
     }]}))
 }
 
+/// Handler pre_mortem : génère des guardrails pour un job à criticité élevée.
+async fn handle_pre_mortem<C: LlmClient + Clone>(
+    server: &CortexServer<C>,
+    arguments: JsonValue,
+) -> DispatchResult {
+    let request =
+        serde_json::from_value::<crate::server::PreMortemRequest>(arguments)
+            .map_err(|e| JsonRpcError {
+                code: INVALID_PARAMS,
+                message: format!("Invalid params for pre_mortem: {}", e),
+                data: None,
+            })?;
+
+    let response = server.pre_mortem(request).await.map_err(|e| JsonRpcError {
+        code: crate::protocol::INTERNAL_ERROR,
+        message: format!("pre_mortem failed: {}", e),
+        data: None,
+    })?;
+
+    let content = serde_json::to_value(&response).map_err(|e| JsonRpcError {
+        code: crate::protocol::INTERNAL_ERROR,
+        message: format!("serialization failed: {}", e),
+        data: None,
+    })?;
+
+    Ok(json!({"content": [{
+        "type": "text",
+        "text": serde_json::to_string_pretty(&content).unwrap()
+    }]}))
+}
+
+/// Handler red_team_audit : audit adversarial d'un artéfact.
+async fn handle_red_team_audit<C: LlmClient + Clone>(
+    server: &CortexServer<C>,
+    arguments: JsonValue,
+) -> DispatchResult {
+    let request =
+        serde_json::from_value::<crate::server::RedTeamAuditRequest>(arguments)
+            .map_err(|e| JsonRpcError {
+                code: INVALID_PARAMS,
+                message: format!("Invalid params for red_team_audit: {}", e),
+                data: None,
+            })?;
+
+    let response = server
+        .red_team_audit(request)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: crate::protocol::INTERNAL_ERROR,
+            message: format!("red_team_audit failed: {}", e),
+            data: None,
+        })?;
+
+    let content = serde_json::to_value(&response).map_err(|e| JsonRpcError {
+        code: crate::protocol::INTERNAL_ERROR,
+        message: format!("serialization failed: {}", e),
+        data: None,
+    })?;
+
+    Ok(json!({"content": [{
+        "type": "text",
+        "text": serde_json::to_string_pretty(&content).unwrap()
+    }]}))
+}
+
+/// Handler harvest_insights : extrait patterns d'un thème complété.
+async fn handle_harvest_insights<C: LlmClient + Clone>(
+    server: &CortexServer<C>,
+    arguments: JsonValue,
+) -> DispatchResult {
+    let request =
+        serde_json::from_value::<crate::server::HarvestInsightsRequest>(arguments)
+            .map_err(|e| JsonRpcError {
+                code: INVALID_PARAMS,
+                message: format!("Invalid params for harvest_insights: {}", e),
+                data: None,
+            })?;
+
+    let response = server
+        .harvest_insights(request)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: crate::protocol::INTERNAL_ERROR,
+            message: format!("harvest_insights failed: {}", e),
+            data: None,
+        })?;
+
+    let content = serde_json::to_value(&response).map_err(|e| JsonRpcError {
+        code: crate::protocol::INTERNAL_ERROR,
+        message: format!("serialization failed: {}", e),
+        data: None,
+    })?;
+
+    Ok(json!({"content": [{
+        "type": "text",
+        "text": serde_json::to_string_pretty(&content).unwrap()
+    }]}))
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -258,7 +394,7 @@ mod tests {
     async fn build_server() -> CortexServer<MockLlmClient> {
         let wal = WalService::connect("sqlite::memory:").await.unwrap();
         let mock = MockLlmClient::with_response(MOCK_PLAN.to_string());
-        CortexServer::new(wal, Architect::new(mock))
+        CortexServer::new(wal, Architect::new(mock.clone()), mock)
     }
 
     #[tokio::test]
@@ -281,14 +417,14 @@ mod tests {
     async fn test_handle_tools_list() {
         let result = handle_tools_list().expect("should succeed");
         let tools = result["tools"].as_array().expect("should be array");
-        assert_eq!(tools.len(), 2);
+        assert_eq!(tools.len(), 5);
 
-        let names: Vec<&str> = tools
-            .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"get_routing_rules"));
         assert!(names.contains(&"intercept_plan"));
+        assert!(names.contains(&"pre_mortem"));
+        assert!(names.contains(&"red_team_audit"));
+        assert!(names.contains(&"harvest_insights"));
     }
 
     #[tokio::test]

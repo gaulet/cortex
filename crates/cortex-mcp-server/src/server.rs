@@ -48,6 +48,63 @@ pub struct GetRoutingRulesResponse {
     pub rules: RoutingRules,
 }
 
+/// Requête pour l'outil `pre_mortem`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreMortemRequest {
+    pub job_id: String,
+    pub job_description: String,
+    pub definition_of_done: String,
+    #[serde(default)]
+    pub context: String,
+}
+
+/// Réponse de l'outil `pre_mortem`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreMortemResponse {
+    pub job_id: String,
+    pub guardrails: Vec<cortex_brains::paranoiac::ExecutableGuardrail>,
+    pub risk_assessment: String,
+    pub estimated_risk_score: u8,
+}
+
+/// Requête pour l'outil `red_team_audit`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedTeamAuditRequest {
+    pub job_id: String,
+    pub definition_of_done: String,
+    #[serde(default)]
+    pub convergence_contract: Option<String>,
+    #[serde(default)]
+    pub guardrails: Vec<cortex_brains::paranoiac::ExecutableGuardrail>,
+    pub artifact: String,
+}
+
+/// Réponse de l'outil `red_team_audit`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedTeamAuditResponse {
+    pub job_id: String,
+    pub passed: bool,
+    pub issues: Vec<cortex_brains::red_team::AuditIssue>,
+    pub approved_layers: Vec<String>,
+    pub summary: String,
+}
+
+/// Requête pour l'outil `harvest_insights`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarvestInsightsRequest {
+    pub theme_id: String,
+    pub theme_name: String,
+    pub jobs_summary: String,
+    #[serde(default)]
+    pub metrics: cortex_brains::insights::ThemeMetrics,
+}
+
+/// Réponse de l'outil `harvest_insights`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarvestInsightsResponse {
+    pub insights: cortex_brains::insights::InsightsResult,
+}
+
 // ============================================================================
 // Erreurs spécifiques au serveur Cortex
 // ============================================================================
@@ -83,6 +140,24 @@ impl From<cortex_brains::ArchitectError> for CortexServerError {
     }
 }
 
+impl From<cortex_brains::paranoiac::PreMortemError> for CortexServerError {
+    fn from(e: cortex_brains::paranoiac::PreMortemError) -> Self {
+        CortexServerError::InternalError(format!("PreMortem failed: {}", e))
+    }
+}
+
+impl From<cortex_brains::red_team::RedTeamError> for CortexServerError {
+    fn from(e: cortex_brains::red_team::RedTeamError) -> Self {
+        CortexServerError::InternalError(format!("RedTeam failed: {}", e))
+    }
+}
+
+impl From<cortex_brains::insights::InsightsError> for CortexServerError {
+    fn from(e: cortex_brains::insights::InsightsError) -> Self {
+        CortexServerError::InternalError(format!("Insights failed: {}", e))
+    }
+}
+
 // ============================================================================
 // CortexServer struct
 // ============================================================================
@@ -94,17 +169,19 @@ impl From<cortex_brains::ArchitectError> for CortexServerError {
 /// `C` : type du LlmClient injecté.
 /// - `MockLlmClient` pour les tests
 /// - Implémentation HTTP (reqwest) ou autre en production
-pub struct CortexServer<C: LlmClient> {
+pub struct CortexServer<C: LlmClient + Clone> {
     wal: Arc<WalService>,
+    llm_client: C,
     architect: Architect<C>,
     routing_rules: RoutingRules,
 }
 
-impl<C: LlmClient> CortexServer<C> {
+impl<C: LlmClient + Clone> CortexServer<C> {
     /// Crée une instance du serveur Cortex.
-    pub fn new(wal: WalService, architect: Architect<C>) -> Self {
+    pub fn new(wal: WalService, architect: Architect<C>, llm_client: C) -> Self {
         Self {
             wal: Arc::new(wal),
+            llm_client,
             architect,
             routing_rules: RoutingRules::default_rules(),
         }
@@ -114,10 +191,12 @@ impl<C: LlmClient> CortexServer<C> {
     pub fn with_routing_rules(
         wal: WalService,
         architect: Architect<C>,
+        llm_client: C,
         routing_rules: RoutingRules,
     ) -> Self {
         Self {
             wal: Arc::new(wal),
+            llm_client,
             architect,
             routing_rules,
         }
@@ -199,9 +278,77 @@ impl<C: LlmClient> CortexServer<C> {
     ///
     /// Utilise les règles de routage chargées au boot.
     pub fn should_route(&self, intent: &str, complexity: u8) -> bool {
-        self.routing_rules.should_route_to_cortex(intent, complexity)
+        self.routing_rules
+            .should_route_to_cortex(intent, complexity)
     }
 
+    /// Outil `pre_mortem` : génère des guardrails pour un job.
+    ///
+    /// Utilisé par Hermes avant dispatch d'un job à criticité ≥ 4.
+    pub async fn pre_mortem(
+        &self,
+        request: PreMortemRequest,
+    ) -> Result<PreMortemResponse, CortexServerError> {
+        let brain = cortex_brains::PreMortem::new(self.llm_client.clone());
+        let result = brain
+            .generate_guardrails(
+                &request.job_id,
+                &request.job_description,
+                &request.definition_of_done,
+                &request.context,
+            )
+            .await?;
+
+        Ok(PreMortemResponse {
+            job_id: result.job_id,
+            guardrails: result.guardrails,
+            risk_assessment: result.risk_assessment,
+            estimated_risk_score: result.estimated_risk_score,
+        })
+    }
+
+    /// Outil `red_team_audit` : audit adversarial d'un artéfact worker.
+    pub async fn red_team_audit(
+        &self,
+        request: RedTeamAuditRequest,
+    ) -> Result<RedTeamAuditResponse, CortexServerError> {
+        let brain = cortex_brains::RedTeam::new(self.llm_client.clone());
+        let result = brain
+            .audit(
+                &request.job_id,
+                &request.definition_of_done,
+                request.convergence_contract.as_deref(),
+                &request.guardrails,
+                &request.artifact,
+            )
+            .await?;
+
+        Ok(RedTeamAuditResponse {
+            job_id: result.job_id,
+            passed: result.passed,
+            issues: result.issues,
+            approved_layers: result.approved_layers,
+            summary: result.summary,
+        })
+    }
+
+    /// Outil `harvest_insights` : extrait patterns/leçons d'un thème complété.
+    pub async fn harvest_insights(
+        &self,
+        request: HarvestInsightsRequest,
+    ) -> Result<HarvestInsightsResponse, CortexServerError> {
+        let brain = cortex_brains::InsightsHarvester::new(self.llm_client.clone());
+        let insights = brain
+            .harvest(
+                &request.theme_id,
+                &request.theme_name,
+                &request.jobs_summary,
+                request.metrics,
+            )
+            .await?;
+
+        Ok(HarvestInsightsResponse { insights })
+    }
     /// Référence au WAL service (pour usage avancé, ex: tools.rs).
     pub fn wal(&self) -> &WalService {
         &self.wal
@@ -325,8 +472,7 @@ mod tests {
             .await
             .expect("in-memory WAL");
         let mock = MockLlmClient::with_response(VALID_PLAN_JSON.to_string());
-        let architect = Architect::new(mock);
-        let server = CortexServer::new(wal, architect);
+        let server = CortexServer::new(wal, Architect::new(mock.clone()), mock);
 
         // Server should have default rules
         let resp = server.get_routing_rules().await.expect("rules");
@@ -337,7 +483,7 @@ mod tests {
     async fn test_get_routing_rules_returns_default() {
         let wal = TestedWalService::connect("sqlite::memory:").await.unwrap();
         let mock = MockLlmClient::with_response("".to_string());
-        let server = CortexServer::new(wal, Architect::new(mock));
+        let server = CortexServer::new(wal, Architect::new(mock.clone()), mock);
 
         let resp = server.get_routing_rules().await.unwrap();
         assert!(resp.rules.enabled);
@@ -348,7 +494,7 @@ mod tests {
     async fn test_intercept_plan_generates_plan() {
         let wal = TestedWalService::connect("sqlite::memory:").await.unwrap();
         let mock = MockLlmClient::with_response(VALID_PLAN_JSON.to_string());
-        let server = CortexServer::new(wal, Architect::new(mock));
+        let server = CortexServer::new(wal, Architect::new(mock.clone()), mock);
 
         let req = InterceptPlanRequest {
             intent: "Refactorise le module auth".to_string(),
@@ -374,7 +520,7 @@ mod tests {
     async fn test_intercept_plan_uses_provided_project_id() {
         let wal = TestedWalService::connect("sqlite::memory:").await.unwrap();
         let mock = MockLlmClient::with_response(VALID_PLAN_JSON.to_string());
-        let server = CortexServer::new(wal, Architect::new(mock));
+        let server = CortexServer::new(wal, Architect::new(mock.clone()), mock);
 
         let req = InterceptPlanRequest {
             intent: "Refactorise le module".to_string(),
@@ -390,7 +536,7 @@ mod tests {
     async fn test_intercept_plan_logs_to_wal() {
         let wal = TestedWalService::connect("sqlite::memory:").await.unwrap();
         let mock = MockLlmClient::with_response(VALID_PLAN_JSON.to_string());
-        let server = CortexServer::new(wal, Architect::new(mock));
+        let server = CortexServer::new(wal, Architect::new(mock.clone()), mock);
 
         let req = InterceptPlanRequest {
             intent: "Refactorise".to_string(),
@@ -410,7 +556,7 @@ mod tests {
     async fn test_intercept_plan_fails_on_invalid_llm_response() {
         let wal = TestedWalService::connect("sqlite::memory:").await.unwrap();
         let mock = MockLlmClient::with_response("pas un JSON valide".to_string());
-        let server = CortexServer::new(wal, Architect::new(mock));
+        let server = CortexServer::new(wal, Architect::new(mock.clone()), mock);
 
         let req = InterceptPlanRequest {
             intent: "Refactorise".to_string(),
@@ -435,7 +581,7 @@ mod tests {
     async fn test_should_route_uses_routing_rules() {
         let wal = TestedWalService::connect("sqlite::memory:").await.unwrap();
         let mock = MockLlmClient::with_response("".to_string());
-        let server = CortexServer::new(wal, Architect::new(mock));
+        let server = CortexServer::new(wal, Architect::new(mock.clone()), mock);
 
         // Intent avec "refactor" + complexity ≥ 5 → route
         assert!(server.should_route("Refactorise le module", 7));

@@ -66,8 +66,8 @@ async fn main() -> Result<()> {
     // 3. Create CortexServer with mock LLM (MVP). TODO: real LLM client via config
     let mock_plan = r#"{"themes":[{"id":"TH-1","name":"Plan placeholder (mock LLM)","is_parallel_branch":false,"convergence_contract":null,"depends_on":[],"criticity_score":2,"resources_used":[],"concurrency_group":null,"tasks":[{"id":"T-1.1","name":"TODO: brancher vrai LLM","definition_of_done":"LLM reel repond","depends_on":[]}]}],"concurrency_groups":[],"parking_lot":[],"ignored_noise":[],"impact_warnings":[]}"#;
     let mock_llm = MockLlmClient::with_response(mock_plan.to_string());
-    let architect = Architect::new(mock_llm);
-    let server = CortexServer::new(wal, architect);
+    let architect = Architect::new(mock_llm.clone());
+    let server = CortexServer::new(wal, architect, mock_llm);
     info!("CortexServer initialized with MockLlmClient (MVP)");
 
     info!("Ready. Entering stdio loop (Ctrl+C to exit).");
