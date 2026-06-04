@@ -51,6 +51,16 @@ See [CORTEX-USER-GUIDE.md](CORTEX-USER-GUIDE.md) for the full guide, and [DEPLOY
 
 **12 MCP tools** total, all via stdio JSON-RPC 2.0.
 
+## Status
+
+- **30+ commits** on `master`
+- **166/166 tests passing** (SQLite default + 4 PG live tests via `TEST_POSTGRES_URL`)
+- **0 warnings clippy**
+- **0 panics en code prod** (audit Session 7)
+- **6 crates** workspace (core, actors, brains, security, webhooks, server)
+- **12 MCP tools** + **5 webhook events** + **13 compteurs + 1 gauge + 8 histogrammes** Prometheus
+- **Dual backend WAL** : SQLite (défaut) + PostgreSQL (opt-in via `--features cortex-core/postgres`)
+
 ## 🏗️ Architecture
 
 5+1 Rust crates, **zero external runtime deps**:
@@ -62,7 +72,11 @@ cortex-actors (Actor Model, 1 actor = 1 project)
     ↓
 cortex-brains (Architect, PreMortem, RedTeam, InsightsHarvester)
     ↓
-cortex-core (WAL, Metrics, Routing, Scratchpad)
+cortex-webhooks (5 events HTTP sortants : fire-and-forget + retry)
+    ↓
+cortex-core (WAL dual backend SQLite/PG, Metrics, Routing, Scratchpad)
+    ↓
+cortex-security (HMAC-SHA256 anti-tampering)
     ↓
 cortex-security (HMAC-SHA256 anti-tampering)
     ↓
