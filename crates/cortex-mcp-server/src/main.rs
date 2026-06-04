@@ -198,8 +198,12 @@ fn build_llm_client() -> Result<AnyLlmClient> {
                 base_url, model, timeout, reasoning
             );
 
-            let client = HttpLlmClient::new(api_key, base_url, model)
-                .with_timeout(timeout)
+            // Session 7 hardening : try_new + try_with_timeout propagent
+            // les erreurs au lieu de panic au boot.
+            let client = HttpLlmClient::try_new(api_key, base_url, model)
+                .map_err(|e| anyhow::anyhow!("LLM client init failed: {}", e))?
+                .try_with_timeout(timeout)
+                .map_err(|e| anyhow::anyhow!("LLM client timeout config failed: {}", e))?
                 .with_reasoning(reasoning.as_deref());
             Ok(AnyLlmClient::Http(client))
         }

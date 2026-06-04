@@ -133,7 +133,11 @@ struct OpenAiErrorDetail {
 // ============================================================================
 
 impl HttpLlmClient {
-    /// Create a new HTTP client.
+    /// Create a new HTTP client (panics on builder failure).
+    ///
+    /// Prefer [`HttpLlmClient::try_new`] in production code. This method
+    /// is kept for tests and for the rare case where you genuinely cannot
+    /// propagate an error.
     ///
     /// - `api_key` : bearer token
     /// - `base_url` : ex `https://openrouter.ai/api/v1` ou `http://localhost:11434/v1`
@@ -143,27 +147,44 @@ impl HttpLlmClient {
         base_url: impl Into<String>,
         default_model: impl Into<String>,
     ) -> Self {
+        Self::try_new(api_key, base_url, default_model)
+            .expect("reqwest::Client::builder().build() should not fail with sane defaults")
+    }
+
+    /// Crée un client HTTP, retourne [`LlmError`] si le builder échoue.
+    ///
+    /// Session 7 hardening : pas de panic en code prod.
+    pub fn try_new(
+        api_key: impl Into<String>,
+        base_url: impl Into<String>,
+        default_model: impl Into<String>,
+    ) -> Result<Self, LlmError> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
-            .expect("failed to build reqwest client");
-
-        Self {
+            .map_err(|e| LlmError::RequestFailed(format!("failed to build reqwest client: {}", e)))?;
+        Ok(Self {
             client,
             api_key: api_key.into(),
             base_url: base_url.into(),
             default_model: default_model.into(),
             reasoning_effort: None,
-        }
+        })
     }
 
-    /// Change le timeout (en secondes).
+    /// Change le timeout (en secondes). Panics on builder failure.
     pub fn with_timeout(self, timeout_secs: u64) -> Self {
+        self.try_with_timeout(timeout_secs)
+            .expect("reqwest::Client::builder().build() should not fail with sane defaults")
+    }
+
+    /// Change le timeout, retourne [`LlmError`] si le builder échoue.
+    pub fn try_with_timeout(self, timeout_secs: u64) -> Result<Self, LlmError> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
             .build()
-            .expect("failed to build reqwest client");
-        Self { client, ..self }
+            .map_err(|e| LlmError::RequestFailed(format!("failed to build reqwest client: {}", e)))?;
+        Ok(Self { client, ..self })
     }
 
     /// Active le raisonnement étendu avec l'effort spécifié.

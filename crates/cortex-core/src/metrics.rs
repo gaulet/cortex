@@ -244,6 +244,10 @@ pub struct Metrics {
     pub recovery_escalated: AtomicU64,
     pub llm_requests_total: AtomicU64,
     pub llm_tokens_consumed: AtomicU64,
+    /// Session 7 hardening : compteur d'erreurs de validation centralisée.
+    /// Incrémenté à chaque rejet par `validate_non_empty`.
+    /// Utile pour détecter les clients mal configurés.
+    pub validation_errors_total: AtomicU64,
     // Gauge (1)
     pub start_time: AtomicI64, // unix timestamp millis du boot
     // Histograms (8) — Session 6 option A
@@ -272,6 +276,7 @@ impl Metrics {
             recovery_escalated: AtomicU64::new(0),
             llm_requests_total: AtomicU64::new(0),
             llm_tokens_consumed: AtomicU64::new(0),
+            validation_errors_total: AtomicU64::new(0),
             start_time: AtomicI64::new(chrono::Utc::now().timestamp_millis()),
             intercept_plan_duration: Histogram::default(),
             pre_mortem_duration: Histogram::default(),
@@ -322,6 +327,10 @@ impl Metrics {
     pub fn add_llm_tokens(&self, n: u64) {
         self.llm_tokens_consumed.fetch_add(n, Ordering::Relaxed);
     }
+    /// Incrémente le compteur d'erreurs de validation.
+    pub fn inc_validation_error(&self) {
+        self.validation_errors_total.fetch_add(1, Ordering::Relaxed);
+    }
 
     /// Sérialise TOUTES les métriques (counters + gauge + 8 histogrammes)
     /// au format Prometheus (text/plain).
@@ -332,8 +341,8 @@ impl Metrics {
 
         let mut out = String::with_capacity(4096);
 
-        // ============ COUNTERS (13) ============
-        let counters: [(&str, &str, u64); 12] = [
+        // ============ COUNTERS (14) ============
+        let counters: [(&str, &str, u64); 13] = [
             (
                 "cortex_jobs_dispatched_total",
                 "Total jobs dispatched",
@@ -383,6 +392,11 @@ impl Metrics {
                 "cortex_llm_tokens_consumed_total",
                 "LLM tokens consumed",
                 self.llm_tokens_consumed.load(Ordering::Relaxed),
+            ),
+            (
+                "cortex_validation_errors_total",
+                "Total validation errors (empty fields, etc.) — Session 7 hardening",
+                self.validation_errors_total.load(Ordering::Relaxed),
             ),
             // Ces deux derniers sont des sous-catégories du même nom avec labels
             // → traités en dehors du tableau ci-dessous

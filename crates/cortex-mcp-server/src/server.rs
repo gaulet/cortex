@@ -479,6 +479,12 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         &self,
         request: InterceptPlanRequest,
     ) -> Result<InterceptPlanResponse, CortexServerError> {
+        // Session 7 hardening : validation centralisée.
+        self.validate_non_empty("intent", &request.intent)?;
+        if let Some(pid) = &request.project_id {
+            self.validate_non_empty("project_id", pid)?;
+        }
+
         // Session 6 (option A) : démarre le timer pour histogramme Prometheus.
         // Le timer observe automatiquement la durée à la drop (RAII).
         let _timer = self.metrics.intercept_plan_duration.start_timer();
@@ -572,6 +578,26 @@ impl<C: LlmClient + Clone> CortexServer<C> {
             .should_route_to_cortex(intent, complexity)
     }
 
+    /// Helper de validation : rejette les chaînes vides ou whitespace-only.
+    ///
+    /// Évite que des champs critiques (project_id, intent, job_id, etc.)
+    /// soient vides et créent des états cassés en aval (actors avec
+    /// project_id vide, LLM prompts vides, etc.).
+    ///
+    /// Incrémente `cortex_validation_errors_total` à chaque rejet.
+    ///
+    /// Session 7 hardening : validation centralisée.
+    fn validate_non_empty(&self, field_name: &str, value: &str) -> Result<(), CortexServerError> {
+        if value.trim().is_empty() {
+            self.metrics.inc_validation_error();
+            return Err(CortexServerError::ValidationError(format!(
+                "{} must not be empty or whitespace-only",
+                field_name
+            )));
+        }
+        Ok(())
+    }
+
     /// Outil `pre_mortem` : génère des guardrails pour un job.
     ///
     /// Utilisé par Hermes avant dispatch d'un job à criticité ≥ 4.
@@ -579,6 +605,11 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         &self,
         request: PreMortemRequest,
     ) -> Result<PreMortemResponse, CortexServerError> {
+        // Session 7 hardening : validation centralisée.
+        self.validate_non_empty("job_id", &request.job_id)?;
+        self.validate_non_empty("job_description", &request.job_description)?;
+        self.validate_non_empty("definition_of_done", &request.definition_of_done)?;
+
         let _timer = self.metrics.pre_mortem_duration.start_timer();
         let brain = cortex_brains::PreMortem::new(self.llm_client.clone());
         self.metrics.inc_llm_requests();
@@ -835,6 +866,12 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         &self,
         request: SyncReflectRequest,
     ) -> Result<SyncReflectResponse, CortexServerError> {
+        // Session 7 hardening : validation centralisée.
+        self.validate_non_empty("project_id", &request.project_id)?;
+        self.validate_non_empty("job_id", &request.job_id)?;
+        self.validate_non_empty("artifact", &request.artifact)?;
+        self.validate_non_empty("definition_of_done", &request.definition_of_done)?;
+
         let _timer = self.metrics.sync_reflect_duration.start_timer();
         // 0. Session 6 (option C) : get-or-spawn l'actor et check aborted
         let actor = self.get_or_spawn_actor(&request.project_id).await?;
@@ -1084,6 +1121,9 @@ impl<C: LlmClient + Clone> CortexServer<C> {
 
     /// Outil `abort` : emergency stop d'un projet.
     pub async fn abort(&self, request: AbortRequest) -> Result<AbortResponse, CortexServerError> {
+        // Session 7 hardening : validation centralisée.
+        self.validate_non_empty("project_id", &request.project_id)?;
+
         let now = chrono::Utc::now().timestamp_millis();
 
         // Session 6 (option C) : get-or-spawn l'actor et mark aborted.
@@ -1749,6 +1789,61 @@ mod tests {
         assert!(snap_y.has_plan);
         assert_eq!(snap_x.project_id, "proj-X");
         assert_eq!(snap_y.project_id, "proj-Y");
+    }
+
+    #[tokio::test]
+    async fn test_validation_rejects_empty_intent() {
+        // Session 7 hardening : validation centralisée doit rejeter
+        // un intent vide AVANT tout traitement (pas d'appel LLM, pas de WAL).
+        let wal = TestedWalService::connect("sqlite::memory:").await.unwrap();
+        let mock = MockLlmClient::with_response(VALID_PLAN_JSON.to_string());
+        let server = CortexServer::new(wal, Architect::new(mock.clone()), mock);
+
+        let req = InterceptPlanRequest {
+            project_id: Some("proj_validation_1".to_string()),
+            intent: "".to_string(), // ← vide
+            context: "x".to_string(),
+        };
+        let result = server.intercept_plan(req).await;
+        assert!(result.is_err(), "intercept_plan should reject empty intent");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CortexServerError::ValidationError(_)),
+            "expected ValidationError, got {:?}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validation_rejects_whitespace_only_intent() {
+        // Mêmes règles pour whitespace-only (trim().is_empty()).
+        let wal = TestedWalService::connect("sqlite::memory:").await.unwrap();
+        let mock = MockLlmClient::with_response(VALID_PLAN_JSON.to_string());
+        let server = CortexServer::new(wal, Architect::new(mock.clone()), mock);
+
+        let req = InterceptPlanRequest {
+            project_id: None,
+            intent: "   \t  \n  ".to_string(),
+            context: "x".to_string(),
+        };
+        let result = server.intercept_plan(req).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_validation_metric_increments_on_reject() {
+        // cortex_validation_errors_total doit s'incrémenter à chaque
+        // rejet. Permet de détecter en PromQL les clients mal configurés.
+        use cortex_core::metrics::Metrics;
+        let metrics = Metrics::new();
+        let before = metrics
+            .validation_errors_total
+            .load(std::sync::atomic::Ordering::Relaxed);
+        metrics.inc_validation_error();
+        let after = metrics
+            .validation_errors_total
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(after, before + 1);
     }
 
     #[tokio::test]
