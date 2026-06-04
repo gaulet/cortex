@@ -24,13 +24,16 @@
 //! - `CORTEX_LLM_BASE_URL` (default : `https://openrouter.ai/api/v1`)
 //! - `CORTEX_LLM_MODEL` (default : `minimax/minimax-m3`)
 //! - `CORTEX_LLM_TIMEOUT` (default : 60) — timeout HTTP en secondes
+//! - `CORTEX_LLM_REASONING` (default : `max`) — effort de raisonnement : `low` | `medium` | `high` | `max`
+//! - `CORTEX_HMAC_SECRET` (optionnel) — secret HMAC-SHA256 pour signer les guardrails Pre-Mortem
 //!
-//! Exemple pour utiliser OpenRouter :
+//! Exemple pour utiliser MiniMax M3 via OpenRouter avec raisonnement max :
 //! ```bash
 //! CORTEX_LLM_PROVIDER=openai \
-//! CORTEX_LLM_API_KEY=sk-or-xxx \
+//! CORTEX_LLM_API_KEY=*** \
 //! CORTEX_LLM_BASE_URL=https://openrouter.ai/api/v1 \
-//! CORTEX_LLM_MODEL=anthropic/claude-sonnet-4 \
+//! CORTEX_LLM_MODEL=minimax/minimax-m3 \
+//! CORTEX_LLM_REASONING=max \
 //! cargo run --bin cortex-mcp
 //! ```
 
@@ -178,13 +181,16 @@ fn build_llm_client() -> Result<AnyLlmClient> {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(60);
+            let reasoning = std::env::var("CORTEX_LLM_REASONING").ok();
 
             info!(
-                "Using HttpLlmClient: base_url={} model={} timeout={}s",
-                base_url, model, timeout
+                "Using HttpLlmClient: base_url={} model={} timeout={}s reasoning={:?}",
+                base_url, model, timeout, reasoning
             );
 
-            let client = HttpLlmClient::new(api_key, base_url, model).with_timeout(timeout);
+            let client = HttpLlmClient::new(api_key, base_url, model)
+                .with_timeout(timeout)
+                .with_reasoning(reasoning.as_deref());
             Ok(AnyLlmClient::Http(client))
         }
         other => Err(anyhow::anyhow!(

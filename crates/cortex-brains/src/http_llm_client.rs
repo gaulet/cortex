@@ -61,6 +61,9 @@ pub struct HttpLlmClient {
     api_key: String,
     base_url: String,
     default_model: String,
+    /// Effort de raisonnement étendu (OpenRouter, Anthropic thinking, o1-style).
+    /// Valeurs acceptées : "low" | "medium" | "high" | "max". None = désactivé.
+    reasoning_effort: Option<String>,
 }
 
 // ============================================================================
@@ -75,6 +78,16 @@ struct OpenAiRequest {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    /// OpenRouter / Anthropic-style extended reasoning.
+    /// Format: { "effort": "max" } ou { "max_tokens": 16000 }
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<OpenAiReasoning>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct OpenAiReasoning {
+    /// "low" | "medium" | "high" | "max"
+    effort: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -136,6 +149,7 @@ impl HttpLlmClient {
             api_key: api_key.into(),
             base_url: base_url.into(),
             default_model: default_model.into(),
+            reasoning_effort: None,
         }
     }
 
@@ -146,6 +160,22 @@ impl HttpLlmClient {
             .build()
             .expect("failed to build reqwest client");
         Self { client, ..self }
+    }
+
+    /// Active le raisonnement étendu avec l'effort spécifié.
+    ///
+    /// Valeurs acceptées : "low" | "medium" | "high" | "max"
+    /// None ou "" → désactive.
+    ///
+    /// Injecte `"reasoning": { "effort": "..." }` dans le body de la requête.
+    /// Compatible OpenRouter (tous les modèles reasoning-enabled), Anthropic
+    /// (thinking), et o1-style providers.
+    pub fn with_reasoning(mut self, effort: Option<&str>) -> Self {
+        self.reasoning_effort = effort
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        self
     }
 
     /// Build OpenAI request body from LlmRequest.
@@ -167,6 +197,11 @@ impl HttpLlmClient {
             messages,
             temperature: req.temperature,
             max_tokens: req.max_tokens,
+            reasoning: self.reasoning_effort.as_ref().map(|effort| {
+                OpenAiReasoning {
+                    effort: effort.clone(),
+                }
+            }),
         }
     }
 
@@ -345,12 +380,72 @@ mod tests {
             }],
             temperature: None,
             max_tokens: None,
+            reasoning: None,
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["model"], "gpt-4");
+        assert!(json.get("temperature").is_none());
+        assert!(json.get("max_tokens").is_none());
+        assert!(json.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn test_serialize_request_body_with_reasoning() {
+        let body = OpenAiRequest {
+            model: "minimax/minimax-m3".into(),
+            messages: vec![OpenAiMessage {
+                role: "user".into(),
+                content: "explain".into(),
+            }],
+            temperature: None,
+            max_tokens: None,
+            reasoning: Some(OpenAiReasoning {
+                effort: "max".into(),
+            }),
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["reasoning"]["effort"], "max");
+    }
+
+    #[test]
+    fn test_with_reasoning_normalizes_input() {
+        let c = HttpLlmClient::new("k", "https://x", "m").with_reasoning(Some("  MAX "));
+        let body = c.build_request_body(&LlmRequest {
+            system: String::new(),
+            user: "q".into(),
+            model: None,
+            temperature: None,
+            max_tokens: None,
+        });
+        assert_eq!(body.reasoning.as_ref().unwrap().effort, "MAX");
+    }
+
+    #[test]
+    fn test_with_reasoning_empty_disables() {
+        let c = HttpLlmClient::new("k", "https://x", "m").with_reasoning(Some(""));
+        let body = c.build_request_body(&LlmRequest {
+            system: String::new(),
+            user: "q".into(),
+            model: None,
+            temperature: None,
+            max_tokens: None,
+        });
+        assert!(body.reasoning.is_none());
+    }
+
+    #[test]
+    fn test_request_body_serializes_model_and_messages() {
+        let body = OpenAiRequest {
+            model: "gpt-4".into(),
+            messages: vec![OpenAiMessage {
+                role: "user".into(),
+                content: "hi".into(),
+            }],
+            temperature: None,
+            max_tokens: None,
+            reasoning: None,
         };
         let json = serde_json::to_string(&body).unwrap();
-
-        // Temperature et max_tokens absent de JSON (skip_serializing_if)
-        assert!(!json.contains("temperature"));
-        assert!(!json.contains("max_tokens"));
         assert!(json.contains("\"model\":\"gpt-4\""));
         assert!(json.contains("\"user\""));
         assert!(json.contains("\"hi\""));
