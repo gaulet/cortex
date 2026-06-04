@@ -138,7 +138,10 @@ async fn main() -> Result<()> {
                 info!("Received request: {} (id={:?})", req.method, req.id);
                 match dispatch(&server, &req.method, req.params).await {
                     Some(Ok(result)) => {
-                        Some(JsonRpcResponse::success(req.id.unwrap(), result).to_line())
+                        // req.id est Option<JsonValue> : None = notification JSON-RPC (pas de réponse).
+                        // On ne panic plus : si id est None, on ne répond pas.
+                        req.id
+                            .map(|id| JsonRpcResponse::success(id, result).to_line())
                     }
                     Some(Err(err)) => {
                         Some(JsonRpcErrorResponse::error(req.id, err.code, err.message).to_line())

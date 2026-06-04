@@ -304,7 +304,7 @@ async fn handle_get_routing_rules<C: LlmClient + Clone>(
 
     Ok(json!({"content": [{
         "type": "text",
-        "text": serde_json::to_string_pretty(&content).unwrap()
+        "text": serde_json::to_string_pretty(&content).map_err(|e| JsonRpcError { code: crate::protocol::INTERNAL_ERROR, message: format!("pretty-print failed: {}", e), data: None, })?
     }]}))
 }
 
@@ -357,7 +357,7 @@ async fn handle_intercept_plan<C: LlmClient + Clone>(
 
     Ok(json!({"content": [{
         "type": "text",
-        "text": serde_json::to_string_pretty(&content).unwrap()
+        "text": serde_json::to_string_pretty(&content).map_err(|e| JsonRpcError { code: crate::protocol::INTERNAL_ERROR, message: format!("pretty-print failed: {}", e), data: None, })?
     }]}))
 }
 
@@ -459,7 +459,7 @@ async fn handle_red_team_audit<C: LlmClient + Clone>(
 
     Ok(json!({"content": [{
         "type": "text",
-        "text": serde_json::to_string_pretty(&content).unwrap()
+        "text": serde_json::to_string_pretty(&content).map_err(|e| JsonRpcError { code: crate::protocol::INTERNAL_ERROR, message: format!("pretty-print failed: {}", e), data: None, })?
     }]}))
 }
 
@@ -492,7 +492,7 @@ async fn handle_harvest_insights<C: LlmClient + Clone>(
 
     Ok(json!({"content": [{
         "type": "text",
-        "text": serde_json::to_string_pretty(&content).unwrap()
+        "text": serde_json::to_string_pretty(&content).map_err(|e| JsonRpcError { code: crate::protocol::INTERNAL_ERROR, message: format!("pretty-print failed: {}", e), data: None, })?
     }]}))
 }
 
@@ -509,7 +509,7 @@ fn tool_response<T: serde::Serialize>(response: T) -> DispatchResult {
     })?;
     Ok(json!({"content": [{
         "type": "text",
-        "text": serde_json::to_string_pretty(&content).unwrap()
+        "text": serde_json::to_string_pretty(&content).map_err(|e| JsonRpcError { code: crate::protocol::INTERNAL_ERROR, message: format!("pretty-print failed: {}", e), data: None, })?
     }]}))
 }
 
