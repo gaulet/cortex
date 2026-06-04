@@ -169,6 +169,18 @@ pub struct WalService {
     /// Postgres pool (si backend = Postgres)
     #[cfg(feature = "postgres")]
     postgres_pool: Option<sqlx::PgPool>,
+    /// Session 7 hardening : Mutex par project_id pour sérialiser les
+    /// `recover_uncommitted` concurrents sur le même projet.
+    ///
+    /// Sans cette protection, 2 recovers parallèles créeraient des
+    /// doublons : 2× entrées `recovery_rollback`, 2× webhooks
+    /// `recovery_triggered`, 2× métriques inflated.
+    ///
+    /// Pattern : `try_lock_or_skip`. Si le lock est déjà pris (un autre
+    /// recover est en cours), on retourne un report vide. Le caller
+    /// (server.rs::recover_project) saura qu'un recover est actif.
+    recovery_locks:
+        std::sync::Arc<dashmap::DashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl WalService {
@@ -219,6 +231,7 @@ impl WalService {
             sqlite_pool: Some(pool),
             #[cfg(feature = "postgres")]
             postgres_pool: None,
+            recovery_locks: std::sync::Arc::new(dashmap::DashMap::new()),
         };
         service.run_migrations().await?;
         Ok(service)
@@ -241,6 +254,7 @@ impl WalService {
             sqlite_pool: None,
             #[cfg(feature = "postgres")]
             postgres_pool: Some(pool),
+            recovery_locks: std::sync::Arc::new(dashmap::DashMap::new()),
         };
         service.run_migrations().await?;
         Ok(service)
@@ -318,6 +332,40 @@ impl WalService {
 
     /// Recover uncommitted WAL entries (crash recovery).
     pub async fn recover_uncommitted(&self, project_id: &str) -> Result<RecoveryReport> {
+        // Session 7 hardening : sérialise les recovers concurrents sur
+        // le même project_id via try_lock-or-skip.
+        //
+        // Sans ça, 2 MCP workers qui appellent recover_project en //
+        // créeraient 2× entrées `recovery_rollback`, 2× webhooks
+        // `recovery_triggered`, 2× métriques inflated.
+        //
+        // Si le lock est déjà pris, on retourne un report vide
+        // (skip silencieux + log info). Le caller saura qu'un recover
+        // est actif et n'aura pas de doublons.
+        let lock = self
+            .recovery_locks
+            .entry(project_id.to_string())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+
+        let _guard = match lock.try_lock() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::info!(
+                    project_id = %project_id,
+                    "recover_uncommitted skipped: another recovery in progress for this project"
+                );
+                return Ok(RecoveryReport {
+                    project_id: project_id.to_string(),
+                    uncommitted_count: 0,
+                    rolled_back: Vec::new(),
+                    escalated: Vec::new(),
+                });
+            }
+        };
+
+        // Le lock est tenu : on est seul à faire le recovery.
+        // Le _guard est droppé à la fin de la fonction, libérant le lock.
         let uncommitted = self.list_uncommitted(project_id).await?;
         let mut report = RecoveryReport {
             project_id: project_id.to_string(),
@@ -1222,6 +1270,105 @@ mod tests {
         assert_eq!(report.uncommitted_count, 2);
         assert_eq!(report.escalated.len(), 1, "sync_reflect → escalate");
         assert_eq!(report.rolled_back.len(), 1, "unknown → rollback");
+    }
+
+    /// Session 7 hardening : si 2 recovers s'exécutent en parallèle sur
+    /// le même project_id, le 2e doit skipper (try_lock fail) et
+    /// AUCUN doublon ne doit être créé (1 seul `recovery_rollback` entry,
+    /// 1 seul webhook fired en aval, 1 seul incrément de métrique).
+    #[tokio::test]
+    async fn test_concurrent_recover_uncommitted_does_not_duplicate() {
+        let wal = test_wal().await;
+        // Setup : 2 entries uncommitted sur le même projet.
+        // 1 doit être escalated (sync_reflect), 1 doit être rollback (unknown_action).
+        wal.write_prepare(
+            "proj_concurrent",
+            "sync_reflect",
+            Some("J-1"),
+            None,
+            &json!({}),
+        )
+        .await
+        .unwrap();
+        wal.write_prepare("proj_concurrent", "unknown_action", None, None, &json!({}))
+            .await
+            .unwrap();
+
+        // Lance 2 recovers en // sur le même projet.
+        // Le lock try_lock-or-skip doit garantir qu'un seul fait le travail.
+        let wal_a = wal.clone();
+        let wal_b = wal.clone();
+        let (res_a, res_b) = tokio::join!(
+            async move { wal_a.recover_uncommitted("proj_concurrent").await },
+            async move { wal_b.recover_uncommitted("proj_concurrent").await },
+        );
+        let report_a = res_a.expect("recover a");
+        let report_b = res_b.expect("recover b");
+
+        // Assertion 1 : total des uncommitted_count entre les 2 reports
+        // doit être EXACTEMENT 2 (= nombre d'entries initiales), pas 4.
+        let total_uncommitted = report_a.uncommitted_count + report_b.uncommitted_count;
+        assert_eq!(
+            total_uncommitted, 2,
+            "sum of uncommitted_count must be 2 (not 4) — duplicate prevention"
+        );
+
+        // Assertion 2 : total rolled_back entre les 2 reports doit être 1.
+        let total_rolled_back = report_a.rolled_back.len() + report_b.rolled_back.len();
+        assert_eq!(
+            total_rolled_back, 1,
+            "sum of rolled_back must be 1 (not 2) — only one recover actually worked"
+        );
+
+        // Assertion 3 : total escalated entre les 2 reports doit être 1.
+        let total_escalated = report_a.escalated.len() + report_b.escalated.len();
+        assert_eq!(
+            total_escalated, 1,
+            "sum of escalated must be 1 (not 2) — only one recover actually worked"
+        );
+
+        // Assertion 4 (LA PLUS IMPORTANTE) : vérifier directement dans la DB
+        // qu'il n'y a QU'UN SEUL `recovery_rollback` entry créé.
+        // C'est ça le vrai test : sans le lock, il y en aurait 2.
+        let uncommitted_after = wal.list_uncommitted("proj_concurrent").await.unwrap();
+        let recovery_rollback_count = uncommitted_after
+            .iter()
+            .filter(|e| e.action == "recovery_rollback")
+            .count();
+        assert_eq!(
+            recovery_rollback_count, 1,
+            "exactly 1 recovery_rollback entry should exist (not 2) — the original bug"
+        );
+    }
+
+    /// Cas inverse : recovers sur des PROJETS DIFFÉRENTS doivent
+    /// s'exécuter en parallèle (pas de blocage croisé).
+    #[tokio::test]
+    async fn test_concurrent_recover_on_different_projects_runs_in_parallel() {
+        let wal = test_wal().await;
+        // Setup : 1 entry uncommitted par projet
+        wal.write_prepare("proj_alpha", "unknown_action", None, None, &json!({}))
+            .await
+            .unwrap();
+        wal.write_prepare("proj_beta", "unknown_action", None, None, &json!({}))
+            .await
+            .unwrap();
+
+        // Les 2 recovers sont sur des projets différents → pas de skip.
+        let wal_a = wal.clone();
+        let wal_b = wal.clone();
+        let (r_alpha, r_beta) = tokio::join!(
+            async move { wal_a.recover_uncommitted("proj_alpha").await },
+            async move { wal_b.recover_uncommitted("proj_beta").await },
+        );
+        let r_alpha = r_alpha.expect("recover alpha");
+        let r_beta = r_beta.expect("recover beta");
+
+        // Chacun doit avoir fait son travail (uncommitted_count = 1)
+        assert_eq!(r_alpha.uncommitted_count, 1);
+        assert_eq!(r_beta.uncommitted_count, 1);
+        assert_eq!(r_alpha.rolled_back.len(), 1);
+        assert_eq!(r_beta.rolled_back.len(), 1);
     }
 
     #[tokio::test]
