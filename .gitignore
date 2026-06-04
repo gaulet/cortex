@@ -1,8 +1,6 @@
-# Rust specific
-/target/
-**/*.rs.bk
-
 # Build artifacts
+target/
+**/*.rs.bk
 Cargo.lock
 
 # IDE
@@ -15,25 +13,17 @@ Cargo.lock
 .DS_Store
 Thumbs.db
 
-# Environment
+# Local env
 .env
 .env.local
+*.local
 
-# Generated files
-*.log
-docs/auto/
-
-# SQLite
+# Local DBs
 *.db
 *.db-shm
 *.db-wal
 *.sqlite
+*.sqlite3
 
-# Artifacts
-*.backup
-/tmp/
-
-# Test artifacts
-test-output/
-coverage/
-tarpaulin-report.html
+# Logs
+*.log
