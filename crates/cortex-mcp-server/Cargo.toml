@@ -23,6 +23,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 cortex-brains = { path = "../cortex-brains", features = [] }

@@ -15,6 +15,24 @@
 //!
 //! JSON-RPC 2.0 over stdio (pas d'autre transport supporté).
 //! Les logs sont envoyés sur stderr pour ne pas polluer la communication MCP.
+//!
+//! ## Configuration via env vars
+//!
+//! - `CORTEX_WAL_URL` (default : `sqlite::memory:`) — URL du SQLite WAL
+//! - `CORTEX_LLM_PROVIDER` (default : `mock`) — `mock` | `openai`
+//! - `CORTEX_LLM_API_KEY` — API key pour OpenAI-compatible (obligatoire si provider=openai)
+//! - `CORTEX_LLM_BASE_URL` (default : `https://openrouter.ai/api/v1`)
+//! - `CORTEX_LLM_MODEL` (default : `minimax/minimax-m3`)
+//! - `CORTEX_LLM_TIMEOUT` (default : 60) — timeout HTTP en secondes
+//!
+//! Exemple pour utiliser OpenRouter :
+//! ```bash
+//! CORTEX_LLM_PROVIDER=openai \
+//! CORTEX_LLM_API_KEY=sk-or-xxx \
+//! CORTEX_LLM_BASE_URL=https://openrouter.ai/api/v1 \
+//! CORTEX_LLM_MODEL=anthropic/claude-sonnet-4 \
+//! cargo run --bin cortex-mcp
+//! ```
 
 mod config;
 mod dispatch;
@@ -25,28 +43,41 @@ pub use server::{CortexServer, CortexServerError};
 
 use std::io::{self, BufRead, Write};
 
-use cortex_brains::{Architect, MockLlmClient};
+use async_trait::async_trait;
+use cortex_brains::{Architect, HttpLlmClient, LlmClient, LlmError, LlmRequest, LlmResponse, MockLlmClient};
 use cortex_core::WalService;
 
 use dispatch::dispatch;
 use protocol::{JsonRpcErrorResponse, JsonRpcRequest, JsonRpcResponse, PARSE_ERROR};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
+/// LLM client concret (mock ou http), Clone + Send + Sync.
+///
+/// Permet d'utiliser `CortexServer<AnyLlmClient>` qui satisfait
+/// `C: LlmClient + Clone` sans utiliser `Box<dyn>`.
+#[derive(Clone)]
+enum AnyLlmClient {
+    Mock(MockLlmClient),
+    Http(HttpLlmClient),
+}
+
+#[async_trait]
+impl LlmClient for AnyLlmClient {
+    async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
+        match self {
+            AnyLlmClient::Mock(c) => c.complete(request).await,
+            AnyLlmClient::Http(c) => c.complete(request).await,
+        }
+    }
+}
+
 /// Point d'entrée du serveur MCP.
-///
-/// ## Boot sequence
-///
-/// 1. Initialize tracing vers stderr
-/// 2. Connect to SQLite (WAL) database
-/// 3. Create CortexServer<MockLlmClient> (MVP)
-/// 4. Enter stdio loop: read JSON-RPC → dispatch → write response
-/// 5. Exit on stdin EOF or SIGINT
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 1. Tracing vers stderr (sinon pollue le flux MPI stdout)
+    // 1. Tracing vers stderr
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
         .with_writer(std::io::stderr)
@@ -57,22 +88,20 @@ async fn main() -> Result<()> {
     info!("Cortex MCP server starting");
     info!("Version: {}", env!("CARGO_PKG_VERSION"));
 
-    // 2. Connect to SQLite in-memory (MVP). TODO: file-based via config
-    let wal = WalService::connect("sqlite::memory:")
+    // 2. WAL service
+    let wal_url = std::env::var("CORTEX_WAL_URL").unwrap_or_else(|_| "sqlite::memory:".to_string());
+    let wal = WalService::connect(&wal_url)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to connect WAL: {}", e))?;
-    info!("WAL service initialized (in-memory)");
+        .with_context(|| format!("Failed to connect WAL at {}", wal_url))?;
+    info!("WAL service initialized (url={})", wal_url);
 
-    // 3. Create CortexServer with mock LLM (MVP). TODO: real LLM client via config
-    let mock_plan = r#"{"themes":[{"id":"TH-1","name":"Plan placeholder (mock LLM)","is_parallel_branch":false,"convergence_contract":null,"depends_on":[],"criticity_score":2,"resources_used":[],"concurrency_group":null,"tasks":[{"id":"T-1.1","name":"TODO: brancher vrai LLM","definition_of_done":"LLM reel repond","depends_on":[]}]}],"concurrency_groups":[],"parking_lot":[],"ignored_noise":[],"impact_warnings":[]}"#;
-    let mock_llm = MockLlmClient::with_response(mock_plan.to_string());
-    let architect = Architect::new(mock_llm.clone());
-    let server = CortexServer::new(wal, architect, mock_llm);
-    info!("CortexServer initialized with MockLlmClient (MVP)");
-
+    // 3. LLM client
+    let llm = build_llm_client().context("Failed to build LLM client")?;
+    let architect = Architect::new(llm.clone());
+    let server = CortexServer::new(wal, architect, llm);
     info!("Ready. Entering stdio loop (Ctrl+C to exit).");
 
-    // 4. Stdio loop : read line from stdin, dispatch, write response to stdout
+    // 4. Stdio loop
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut stdout_handle = stdout.lock();
@@ -86,24 +115,15 @@ async fn main() -> Result<()> {
             }
         };
 
-        // Parse the line
         let parsed = JsonRpcRequest::parse_line(&line);
-
         let response = match parsed {
-            // JSON invalid → error response with null id
             Err(err) => Some(JsonRpcErrorResponse::error(None, PARSE_ERROR, err.message).to_line()),
-
-            // Empty line/whitespace → ignore
             Ok(None) => None,
-
-            // Valid notification (no id) → call dispatch but no output
             Ok(Some(req)) if req.is_notification() => {
                 info!("Received notification: {}", req.method);
                 dispatch(&server, &req.method, req.params).await;
                 None
             }
-
-            // Valid request with id → dispatch and output response
             Ok(Some(req)) => {
                 info!("Received request: {} (id={:?})", req.method, req.id);
                 match dispatch(&server, &req.method, req.params).await {
@@ -129,4 +149,47 @@ async fn main() -> Result<()> {
 
     info!("Stdin closed. Shutting down.");
     Ok(())
+}
+
+/// Construit le LLM client selon la configuration env.
+///
+/// Variantes :
+/// - `mock` (default) : MockLlmClient avec plan placeholder
+/// - `openai` : HttpLlmClient OpenAI-compatible (OpenRouter, OpenAI, ollama, vLLM)
+fn build_llm_client() -> Result<AnyLlmClient> {
+    let provider = std::env::var("CORTEX_LLM_PROVIDER").unwrap_or_else(|_| "mock".to_string());
+
+    match provider.as_str() {
+        "mock" => {
+            info!("Using MockLlmClient (CORTEX_LLM_PROVIDER=mock)");
+            let mock_plan = r#"{"themes":[{"id":"TH-1","name":"Plan placeholder (mock LLM)","is_parallel_branch":false,"convergence_contract":null,"depends_on":[],"criticity_score":2,"resources_used":[],"concurrency_group":null,"tasks":[{"id":"T-1.1","name":"TODO: brancher vrai LLM","definition_of_done":"LLM reel repond","depends_on":[]}]}],"concurrency_groups":[],"parking_lot":[],"ignored_noise":[],"impact_warnings":[]}"#;
+            Ok(AnyLlmClient::Mock(MockLlmClient::with_response(
+                mock_plan.to_string(),
+            )))
+        }
+        "openai" => {
+            let api_key = std::env::var("CORTEX_LLM_API_KEY")
+                .context("CORTEX_LLM_API_KEY required for provider=openai")?;
+            let base_url = std::env::var("CORTEX_LLM_BASE_URL")
+                .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
+            let model = std::env::var("CORTEX_LLM_MODEL")
+                .unwrap_or_else(|_| "minimax/minimax-m3".to_string());
+            let timeout: u64 = std::env::var("CORTEX_LLM_TIMEOUT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(60);
+
+            info!(
+                "Using HttpLlmClient: base_url={} model={} timeout={}s",
+                base_url, model, timeout
+            );
+
+            let client = HttpLlmClient::new(api_key, base_url, model).with_timeout(timeout);
+            Ok(AnyLlmClient::Http(client))
+        }
+        other => Err(anyhow::anyhow!(
+            "Unknown CORTEX_LLM_PROVIDER '{}'. Valid: mock, openai",
+            other
+        )),
+    }
 }
