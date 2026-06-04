@@ -551,7 +551,94 @@ Cortex lit `wal_entries` filtré par `committed=0`, applique les politiques :
 
 ---
 
-## 9. Troubleshooting
+## 9. Webhooks (notifications HTTP sortantes)
+
+Cortex peut notifier des URLs HTTP externes quand des événements critiques se produisent. Utile pour qu'Hermes (ou tout autre service) réagisse **en temps réel** sans avoir à poller.
+
+### Activer
+
+```bash
+# Une ou plusieurs URLs séparées par des virgules
+export CORTEX_WEBHOOK_URLS="https://hermes.local/events,https://backup.local/cortex"
+
+# Optionnel : signer les payloads avec HMAC-SHA256
+export CORTEX_WEBHOOK_HMAC_SECRET=*** rand -hex 32)
+
+# Optionnel : tuning
+export CORTEX_WEBHOOK_TIMEOUT=5          # secondes par tentative
+export CORTEX_WEBHOOK_MAX_RETRIES=3      # nb retries
+```
+
+Si `CORTEX_WEBHOOK_URLS` est vide, le dispatcher est désactivé (zéro overhead).
+
+### 5 événements émis
+
+| Event | Déclencheur | Payload data |
+|-------|-------------|--------------|
+| `plan_generated` | `intercept_plan` succès | `themes_count`, `total_tasks`, `max_criticity`, `summary` |
+| `pre_mortem_emitted` | `pre_mortem` succès | `guardrails_count`, `risk_score` |
+| `recovery_triggered` | `recover_project` | `uncommitted_count`, `rolled_back_count`, `escalated_count` |
+| `audit_failed` | `red_team_audit` (failed) ou `sync_reflect` (action=escalate) | `issues_count`, `critical_issues` |
+| `abort` | `abort` | `reason`, `aborted_at` |
+
+### Format du payload
+
+```json
+{
+  "event": "plan_generated",
+  "timestamp": "2026-06-04T16:52:21Z",
+  "project_id": "project-018f4e9a-7b3c-...",
+  "data": {
+    "themes_count": 3,
+    "total_tasks": 8,
+    "max_criticity": 4,
+    "summary": "Plan avec 3 thèmes..."
+  },
+  "delivery_id": "wh_018f4e9a-7b3c-...",
+  "signature": "hmac_sha256=abc123..."  // si HMAC configuré
+}
+```
+
+### Headers HTTP envoyés
+
+```
+POST /events HTTP/1.1
+Content-Type: application/json
+X-Cortex-Event: plan_generated
+X-Cortex-Delivery-Id: wh_018f4e9a-...
+X-Cortex-Timestamp: 2026-06-04T16:52:21Z
+```
+
+### Sémantique de livraison
+
+- **At-least-once** : 3 retries avec backoff exponentiel (500ms, 1s, 2s)
+- **Idempotent côté récepteur** : `X-Cortex-Delivery-Id` est unique par livraison
+- **Non-bloquant** : `fire()` retourne immédiatement
+- **Best-effort** : si tout échoue, log error mais n'impacte pas Cortex
+
+### Recevoir les webhooks (exemple Python)
+
+```python
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        event = self.headers.get("X-Cortex-Event")
+        delivery_id = self.headers.get("X-Cortex-Delivery-Id")
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length)
+        print(f"[{delivery_id}] {event}: {body.decode()}")
+        self.send_response(200)
+        self.end_headers()
+
+HTTPServer(("", 9100), Handler).serve_forever()
+```
+
+Puis : `export CORTEX_WEBHOOK_URLS=http://localhost:9100/`
+
+---
+
+## 10. Troubleshooting
 
 ### Cortex ne démarre pas
 **Erreur** : `CORTEX_LLM_API_KEY required for provider=openai`

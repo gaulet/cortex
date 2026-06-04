@@ -1,0 +1,53 @@
+name: cortex-postgres-integration
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:  # permet de lancer manuellement
+
+jobs:
+  integration:
+    name: Postgres integration tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: cortex_test
+          POSTGRES_PASSWORD: cortex_test_pw
+          POSTGRES_DB: cortex_test_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cortex_test -d cortex_test_db"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      TEST_POSTGRES_URL: postgres://cortex_test:***@localhost:5432/cortex_test_db
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cortex-mcp -> target
+
+      - name: Build with postgres feature
+        run: cargo build -p cortex-core --no-default-features --features postgres
+
+      - name: Run live postgres tests (gated on TEST_POSTGRES_URL)
+        run: cargo test -p cortex-core --features postgres -- --include-ignored
+
+      - name: Build release binary with postgres
+        run: cargo build --release -p cortex-mcp-server --no-default-features --features cortex-core/postgres
