@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use cortex_brains::{Architect, FractalPlan, LlmClient};
 use cortex_core::{RecoveryReport, RoutingRules, SharedMetrics, WalService};
+use cortex_actors::{ActorRegistry, ProjectActorHandle, JobResult, AuditRecord};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -319,6 +320,10 @@ pub struct CortexServer<C: LlmClient + Clone> {
     pub hmac_secret: Option<Vec<u8>>,
     /// Compteurs Prometheus partagés (lock-free).
     pub metrics: SharedMetrics,
+    /// Actor registry (Session 6, option C).
+    /// Chaque project_id a son ProjectActor qui owns son state.
+    /// Race-free, async-first, pas de Mutex.
+    pub actor_registry: Arc<ActorRegistry>,
 }
 
 impl<C: LlmClient + Clone> CortexServer<C> {
@@ -334,6 +339,23 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         llm_client: C,
         metrics: SharedMetrics,
     ) -> Self {
+        Self::with_metrics_and_registry(
+            wal,
+            architect,
+            llm_client,
+            metrics,
+            Arc::new(ActorRegistry::new()),
+        )
+    }
+
+    /// Constructeur complet (utilisé par `with_metrics` et les tests).
+    pub fn with_metrics_and_registry(
+        wal: WalService,
+        architect: Architect<C>,
+        llm_client: C,
+        metrics: SharedMetrics,
+        actor_registry: Arc<ActorRegistry>,
+    ) -> Self {
         Self {
             wal: Arc::new(wal),
             llm_client,
@@ -341,7 +363,21 @@ impl<C: LlmClient + Clone> CortexServer<C> {
             routing_rules: RoutingRules::default_rules(),
             hmac_secret: None,
             metrics,
+            actor_registry,
         }
+    }
+
+    /// Helper : get-or-spawn un actor pour un project_id.
+    /// Utilisé par tous les handlers project-scoped (intercept_plan, abort, etc.)
+    async fn get_or_spawn_actor(
+        &self,
+        project_id: &str,
+    ) -> Result<ProjectActorHandle, CortexServerError> {
+        // Default project_name/objective : on les enrichira via les messages.
+        // L'actor ne s'en sert que pour le scratchpad initial.
+        self.actor_registry
+            .get_or_create(project_id, project_id, "")
+            .map_err(|e| CortexServerError::InternalError(format!("actor registry: {}", e)))
     }
 
     /// Configure le secret HMAC pour signer les guardrails Pre-Mortem.
@@ -370,6 +406,7 @@ impl<C: LlmClient + Clone> CortexServer<C> {
             routing_rules,
             hmac_secret: None,
             metrics: Arc::new(cortex_core::Metrics::new()),
+            actor_registry: Arc::new(ActorRegistry::new()),
         }
     }
 
@@ -385,10 +422,13 @@ impl<C: LlmClient + Clone> CortexServer<C> {
     /// Outil `intercept_plan` : génère un plan fractal pour l'intention donnée.
     ///
     /// Workflow :
-    /// 1. Log la requête dans WAL (prepare)
-    /// 2. Appelle l'Architect brain
-    /// 3. Log la réponse dans WAL (commit)
-    /// 4. Retourne le plan + metadata
+    /// 1. Get-or-spawn le ProjectActor (option C, Session 6)
+    /// 2. Court-circuit si le projet est aborted
+    /// 3. Log la requête dans WAL (prepare)
+    /// 4. Appelle l'Architect brain
+    /// 5. Log la réponse dans WAL (commit)
+    /// 6. Enregistre le plan dans l'actor (state ownership)
+    /// 7. WAL snapshot : sauvegarde du plan
     pub async fn intercept_plan(
         &self,
         request: InterceptPlanRequest,
@@ -399,7 +439,19 @@ impl<C: LlmClient + Clone> CortexServer<C> {
             None => cortex_core::generate_project_id(),
         };
 
-        // 2. WAL prepare : log la demande
+        // 2. Session 6 (option C) : get-or-spawn l'actor du projet
+        // Race-free car chaque project_id a sa propre mailbox.
+        let actor = self.get_or_spawn_actor(&project_id).await?;
+
+        // 3. Court-circuit si le projet est déjà aborted
+        if actor.is_aborted().await.unwrap_or(false) {
+            return Err(CortexServerError::ValidationError(format!(
+                "project {} is aborted",
+                project_id
+            )));
+        }
+
+        // 4. WAL prepare : log la demande
         let entry_id = self
             .wal
             .write_prepare(
@@ -414,20 +466,24 @@ impl<C: LlmClient + Clone> CortexServer<C> {
             )
             .await?;
 
-        // 3. Appelle l'Architect pour générer le plan
+        // 5. Appelle l'Architect pour générer le plan
         self.metrics.inc_llm_requests();
         let plan = self
             .architect
             .generate_plan(&request.intent, &request.context)
             .await?;
 
-        // 4. Génère résumé user-friendly
+        // 6. Génère résumé user-friendly
         let summary = build_summary(&plan);
 
-        // 5. WAL commit : enregistre la réponse
+        // 7. WAL commit : enregistre la réponse
         self.wal.write_commit(&entry_id).await?;
 
-        // 6. WAL snapshot : sauvegarde du plan comme commit historique
+        // 8. Session 6 : enregistre le plan dans l'actor
+        // L'actor owns maintenant ce state (race-free).
+        let _ = actor.record_plan(plan.clone()).await;
+
+        // 9. WAL snapshot : sauvegarde du plan comme commit historique
         self.wal
             .write_snapshot_commit(
                 &project_id,
@@ -682,6 +738,15 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         &self,
         request: SyncReflectRequest,
     ) -> Result<SyncReflectResponse, CortexServerError> {
+        // 0. Session 6 (option C) : get-or-spawn l'actor et check aborted
+        let actor = self.get_or_spawn_actor(&request.project_id).await?;
+        if actor.is_aborted().await.unwrap_or(false) {
+            return Err(CortexServerError::ValidationError(format!(
+                "project {} is aborted",
+                request.project_id
+            )));
+        }
+
         // 1. Run Red-Team audit
         let audit = self
             .red_team_audit(crate::server::RedTeamAuditRequest {
@@ -721,7 +786,7 @@ impl<C: LlmClient + Clone> CortexServer<C> {
             .await?;
         self.wal.write_commit(&entry_id).await?;
 
-        // 3. Metrics : track outcomes
+        // 4. Metrics : track outcomes
         if action == "commit" {
             self.metrics.inc_jobs_approved();
         } else if action == "escalate" {
@@ -729,6 +794,30 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         } else {
             self.metrics.inc_jobs_rejected(); // retry
         }
+
+        // 5. Session 6 : enregistre le JobResult dans l'actor (race-free)
+        let audit_record = AuditRecord {
+            job_id: request.job_id.clone(),
+            passed: audit.passed,
+            action: action.clone(),
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            issues_count: audit.issues.len(),
+        };
+        let status = if action == "commit" {
+            "committed"
+        } else if action == "escalate" {
+            "escalated"
+        } else {
+            "retried"
+        };
+        let _ = actor
+            .record_job_result(JobResult {
+                job_id: request.job_id.clone(),
+                status: status.to_string(),
+                last_action: action.clone(),
+                last_audit: Some(audit_record),
+            })
+            .await;
 
         Ok(SyncReflectResponse {
             job_id: request.job_id,
@@ -881,6 +970,13 @@ impl<C: LlmClient + Clone> CortexServer<C> {
     /// Outil `abort` : emergency stop d'un projet.
     pub async fn abort(&self, request: AbortRequest) -> Result<AbortResponse, CortexServerError> {
         let now = chrono::Utc::now().timestamp_millis();
+
+        // Session 6 (option C) : get-or-spawn l'actor et mark aborted.
+        // Toutes les opérations ultérieures sur ce projet court-circuiteront.
+        let actor = self.get_or_spawn_actor(&request.project_id).await?;
+        let _ = actor
+            .mark_aborted(request.reason.clone(), now)
+            .await;
 
         let entry_id = self
             .wal
@@ -1395,5 +1491,159 @@ mod tests {
         assert!(text.contains("cortex_jobs_approved_total 1"));
         assert!(text.contains("cortex_jobs_escalated_total 1"));
         assert!(text.contains("cortex_jobs_rejected_total 1"));
+    }
+
+    // ============================================================
+    // Session 6 (option C) : tests actor isolation
+    // ============================================================
+
+    /// Helper : crée un CortexServer avec un MockLlmClient qui retourne un plan valide.
+    async fn make_test_server() -> CortexServer<cortex_brains::MockLlmClient> {
+        let wal = cortex_core::WalService::connect("sqlite::memory:")
+            .await
+            .expect("in-memory WAL");
+        let mock = cortex_brains::MockLlmClient::with_response(VALID_PLAN_JSON.to_string());
+        let architect = Architect::new(mock.clone());
+        CortexServer::new(wal, architect, mock)
+    }
+
+    #[tokio::test]
+    async fn test_actor_registry_count_after_intercept_plan() {
+        // Chaque intercept_plan spawn un actor pour son project_id.
+        let server = make_test_server().await;
+        assert_eq!(server.actor_registry.count(), 0);
+
+        let r1 = server
+            .intercept_plan(InterceptPlanRequest {
+                project_id: Some("proj-A".into()),
+                intent: "Test A".into(),
+                context: "ctx".into(),
+            })
+            .await
+            .expect("plan A");
+
+        let r2 = server
+            .intercept_plan(InterceptPlanRequest {
+                project_id: Some("proj-B".into()),
+                intent: "Test B".into(),
+                context: "ctx".into(),
+            })
+            .await
+            .expect("plan B");
+
+        assert_eq!(server.actor_registry.count(), 2);
+        assert_eq!(r1.project_id, "proj-A");
+        assert_eq!(r2.project_id, "proj-B");
+    }
+
+    #[tokio::test]
+    async fn test_actor_state_recorded_after_intercept_plan() {
+        // Après intercept_plan, l'actor a le plan en state.
+        let server = make_test_server().await;
+        let resp = server
+            .intercept_plan(InterceptPlanRequest {
+                project_id: Some("proj-state".into()),
+                intent: "Build a CLI".into(),
+                context: "Rust".into(),
+            })
+            .await
+            .expect("plan");
+
+        let actor = server
+            .actor_registry
+            .get_or_create(&resp.project_id, &resp.project_id, "")
+            .expect("actor");
+        let snap = actor.get_state().await.expect("snap");
+        assert!(snap.has_plan, "plan should be recorded in actor state");
+        assert!(
+            snap.plan_themes_count > 0,
+            "plan should have themes (got {})",
+            snap.plan_themes_count
+        );
+        assert!(!snap.aborted, "fresh project should not be aborted");
+    }
+
+    #[tokio::test]
+    async fn test_actor_isolation_between_projects() {
+        // 2 projets distincts = 2 actors distincts avec state vraiment isolé.
+        let server = make_test_server().await;
+        server
+            .intercept_plan(InterceptPlanRequest {
+                project_id: Some("proj-X".into()),
+                intent: "Refactor auth".into(),
+                context: "FastAPI".into(),
+            })
+            .await
+            .expect("X");
+        server
+            .intercept_plan(InterceptPlanRequest {
+                project_id: Some("proj-Y".into()),
+                intent: "Export PDF".into(),
+                context: "reportlab".into(),
+            })
+            .await
+            .expect("Y");
+
+        let actor_x = server
+            .actor_registry
+            .get_or_create("proj-X", "proj-X", "")
+            .expect("actor X");
+        let actor_y = server
+            .actor_registry
+            .get_or_create("proj-Y", "proj-Y", "")
+            .expect("actor Y");
+
+        let snap_x = actor_x.get_state().await.expect("snap X");
+        let snap_y = actor_y.get_state().await.expect("snap Y");
+
+        // Les 2 actors ont chacun leur plan enregistré
+        assert!(snap_x.has_plan);
+        assert!(snap_y.has_plan);
+        assert_eq!(snap_x.project_id, "proj-X");
+        assert_eq!(snap_y.project_id, "proj-Y");
+    }
+
+    #[tokio::test]
+    async fn test_abort_blocks_subsequent_intercept_plan() {
+        // Après abort, intercept_plan sur le même projet doit être refusé.
+        let server = make_test_server().await;
+        let r1 = server
+            .intercept_plan(InterceptPlanRequest {
+                project_id: Some("proj-blocked".into()),
+                intent: "First".into(),
+                context: "".into(),
+            })
+            .await
+            .expect("first plan");
+
+        // Abort
+        server
+            .abort(AbortRequest {
+                project_id: r1.project_id.clone(),
+                reason: "user cancelled".into(),
+            })
+            .await
+            .expect("abort");
+
+        // Vérif que l'actor est aborted
+        let actor = server
+            .actor_registry
+            .get_or_create(&r1.project_id, &r1.project_id, "")
+            .expect("actor");
+        assert!(actor.is_aborted().await.expect("is_aborted"));
+
+        // Tentative d'intercept_plan → doit échouer
+        let r2 = server
+            .intercept_plan(InterceptPlanRequest {
+                project_id: Some(r1.project_id.clone()),
+                intent: "Second".into(),
+                context: "".into(),
+            })
+            .await;
+        assert!(
+            r2.is_err(),
+            "intercept_plan should fail on aborted project, got {:?}",
+            r2
+        );
     }
 }
