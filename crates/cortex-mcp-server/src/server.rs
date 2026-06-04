@@ -1031,6 +1031,16 @@ impl<C: LlmClient + Clone> CortexServer<C> {
             .add_recovery_rolled_back(report.rolled_back.len() as u64);
         self.metrics
             .add_recovery_escalated(report.escalated.len() as u64);
+
+        // Session 6 (option C) : clear le flag aborted de l'actor après recovery
+        // réussi, pour permettre au projet de reprendre normalement.
+        if let Ok(actor) = self
+            .actor_registry
+            .get_or_create(&request.project_id, &request.project_id, "")
+        {
+            let _ = actor.clear_aborted().await;
+        }
+
         Ok(report)
     }
 
