@@ -24,4 +24,6 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
-# rmcp = { version = "0.1", features = ["server", "transport-io"] }
+[dev-dependencies]
+cortex-brains = { path = "../cortex-brains", features = [] }
+tokio = { workspace = true, features = ["rt", "macros"] }

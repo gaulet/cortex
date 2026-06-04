@@ -1,27 +1,28 @@
 //! # cortex-mcp-server
 //!
-//! Main binary for Cortex MCP server.
+//! Serveur MCP (Model Context Protocol) pour Cortex.
 //!
-//! This binary exposes 7 + 1 bonus tools via stdio-based MCP:
-//! - `get_routing_rules` : Boot handshake (bonus)
-//! - `intercept_plan` : Generate fractal plan
-//! - `approve_and_execute` : Launch workers (Fire-and-Forget)
-//! - `sync_reflect` : Validate worker output
-//! - `check_jobs_status` : Query project status
-//! - `harvest_insights` : Extract patterns + lessons
-//! - `rollback` : Restore to previous commit
-//! - `abort` : Emergency stop
+//! Expose 7 outils MCP + 1 bonus (`get_routing_rules`) via stdio.
+//!
+//! ## Architecture
+//!
+//! - `CortexServer<C: LlmClient>` : cœur métier (server.rs)
+//! - Main : boucle stdio qui lit les requêtes JSON-RPC et les route vers CortexServer
 //!
 //! ## Transport
 //!
-//! JSON-RPC 2.0 over stdio (stdio is the only supported transport).
+//! JSON-RPC 2.0 over stdio (pas d'autre transport supporté).
+//! Les logs sont envoyés sur stderr pour ne pas polluer la communication MCP.
+
+pub mod server;
+
+pub use server::{CortexServer, CortexServerError};
+
+mod config;
 
 use anyhow::Result;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
-
-mod config;
-mod tools;
 
 /// Server entry point.
 ///

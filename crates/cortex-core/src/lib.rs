@@ -23,3 +23,9 @@ pub use context::*;
 pub use error::*;
 pub use routing::RoutingRules;
 pub use scratchpad::*;
+pub use wal::WalService;
+
+/// Génère un nouvel ID de projet unique.
+pub fn generate_project_id() -> String {
+    format!("project-{}", uuid::Uuid::now_v7())
+}
