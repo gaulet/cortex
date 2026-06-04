@@ -15,6 +15,7 @@
 
 pub mod architect;
 pub mod cost_gating;
+pub mod http_llm_client;
 pub mod insights;
 pub mod llm_client;
 pub mod paranoiac;
@@ -22,6 +23,7 @@ pub mod red_team;
 
 pub use architect::{Architect, ArchitectError, FractalPlan, PlannedTask, PlannedTheme};
 pub use cost_gating::{activate_brains_for_job, CostGating};
+pub use http_llm_client::HttpLlmClient;
 pub use insights::InsightsHarvester;
 pub use llm_client::{LlmClient, LlmError, LlmRequest, LlmResponse, MockLlmClient};
 pub use paranoiac::PreMortem;
