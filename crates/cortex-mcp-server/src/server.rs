@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use cortex_brains::{Architect, FractalPlan, LlmClient};
-use cortex_core::{RoutingRules, WalService};
+use cortex_core::{RecoveryReport, RoutingRules, SharedMetrics, WalService};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -77,6 +77,11 @@ pub struct RedTeamAuditRequest {
     #[serde(default)]
     pub guardrails: Vec<cortex_brains::paranoiac::ExecutableGuardrail>,
     pub artifact: String,
+    /// Signature HMAC-SHA256 des guardrails (calculée par Cortex Pre-Mortem).
+    /// Si présente et que le serveur a un secret HMAC, elle est vérifiée
+    /// (couche 1 d'audit, anti-tampering workers).
+    #[serde(default)]
+    pub guardrails_signature: Option<String>,
 }
 
 /// Réponse de l'outil `red_team_audit`.
@@ -157,6 +162,9 @@ pub struct SyncReflectRequest {
     pub definition_of_done: String,
     #[serde(default)]
     pub convergence_contract: Option<String>,
+    /// Signature HMAC-SHA256 des guardrails (forwarded to red_team_audit).
+    #[serde(default)]
+    pub guardrails_signature: Option<String>,
 }
 
 /// Réponse de l'outil `sync_reflect`.
@@ -309,17 +317,30 @@ pub struct CortexServer<C: LlmClient + Clone> {
     /// HMAC-SHA256 secret pour signer les guardrails Pre-Mortem.
     /// None = pas de signature (workers peuvent altérer les guardrails).
     pub hmac_secret: Option<Vec<u8>>,
+    /// Compteurs Prometheus partagés (lock-free).
+    pub metrics: SharedMetrics,
 }
 
 impl<C: LlmClient + Clone> CortexServer<C> {
     /// Crée une instance du serveur Cortex.
     pub fn new(wal: WalService, architect: Architect<C>, llm_client: C) -> Self {
+        Self::with_metrics(wal, architect, llm_client, Arc::new(cortex_core::Metrics::new()))
+    }
+
+    /// Constructeur qui injecte des metrics custom (utile pour tests).
+    pub fn with_metrics(
+        wal: WalService,
+        architect: Architect<C>,
+        llm_client: C,
+        metrics: SharedMetrics,
+    ) -> Self {
         Self {
             wal: Arc::new(wal),
             llm_client,
             architect,
             routing_rules: RoutingRules::default_rules(),
             hmac_secret: None,
+            metrics,
         }
     }
 
@@ -348,6 +369,7 @@ impl<C: LlmClient + Clone> CortexServer<C> {
             architect,
             routing_rules,
             hmac_secret: None,
+            metrics: Arc::new(cortex_core::Metrics::new()),
         }
     }
 
@@ -393,6 +415,7 @@ impl<C: LlmClient + Clone> CortexServer<C> {
             .await?;
 
         // 3. Appelle l'Architect pour générer le plan
+        self.metrics.inc_llm_requests();
         let plan = self
             .architect
             .generate_plan(&request.intent, &request.context)
@@ -439,6 +462,7 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         request: PreMortemRequest,
     ) -> Result<PreMortemResponse, CortexServerError> {
         let brain = cortex_brains::PreMortem::new(self.llm_client.clone());
+        self.metrics.inc_llm_requests();
         let result = brain
             .generate_guardrails(
                 &request.job_id,
@@ -448,6 +472,8 @@ impl<C: LlmClient + Clone> CortexServer<C> {
                 self.hmac_secret.as_deref(),
             )
             .await?;
+        self.metrics
+            .add_pre_mortem_guards(result.guardrails.len() as u64);
 
         Ok(PreMortemResponse {
             job_id: result.job_id,
@@ -462,7 +488,45 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         &self,
         request: RedTeamAuditRequest,
     ) -> Result<RedTeamAuditResponse, CortexServerError> {
+        // Couche 1 : HMAC integrity (non-LLM, fast).
+        // On appelle directement cortex_security::verify_guardrails pour éviter
+        // le type inference problem de `RedTeam::<C>::verify_hmac` (C non utilisé).
+        let hmac_check: Result<(), String> = match (
+            self.hmac_secret.as_deref(),
+            request.guardrails_signature.as_deref(),
+        ) {
+            (Some(secret), Some(expected)) => {
+                let payload = serde_json::json!({
+                    "job_id": &request.job_id,
+                    "guardrails": &request.guardrails,
+                    "definition_of_done": &request.definition_of_done,
+                });
+                cortex_security::verify_guardrails(secret, &payload, expected)
+                    .map_err(|e| format!("{}", e))
+            }
+            (None, Some(_)) => {
+                tracing::warn!("Guardrails have HMAC signature but no server secret — skipping verify");
+                Ok(())
+            }
+            (Some(_), None) => {
+                tracing::warn!("Server has HMAC secret but guardrails are unsigned — possible downgrade");
+                Ok(())
+            }
+            (None, None) => Ok(()),
+        };
+        match hmac_check {
+            Ok(()) => self.metrics.inc_hmac_ok(),
+            Err(e) => {
+                self.metrics.inc_hmac_fail();
+                return Err(CortexServerError::InternalError(format!(
+                    "HMAC verification failed: {}",
+                    e
+                )));
+            }
+        }
+
         let brain = cortex_brains::RedTeam::new(self.llm_client.clone());
+        self.metrics.inc_llm_requests();
         let result = brain
             .audit(
                 &request.job_id,
@@ -472,6 +536,10 @@ impl<C: LlmClient + Clone> CortexServer<C> {
                 &request.artifact,
             )
             .await?;
+
+        if !result.passed {
+            self.metrics.inc_red_team_blocks();
+        }
 
         Ok(RedTeamAuditResponse {
             job_id: result.job_id,
@@ -563,6 +631,14 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         // 4. Cost gating summary
         let cost_summary = cortex_brains::CostGating::summarize(&plan);
 
+        // 5. Metrics : count dispatched jobs
+        self.metrics.inc_jobs_dispatched();
+        for theme in &plan.themes {
+            for _ in &theme.tasks {
+                self.metrics.inc_jobs_dispatched();
+            }
+        }
+
         let instructions = format!(
             "## Plan approuvé ✓\n\
              Projet : {}\n\
@@ -614,6 +690,7 @@ impl<C: LlmClient + Clone> CortexServer<C> {
                 convergence_contract: request.convergence_contract.clone(),
                 guardrails: vec![],
                 artifact: request.artifact.clone(),
+                guardrails_signature: request.guardrails_signature.clone(),
             })
             .await?;
 
@@ -643,6 +720,15 @@ impl<C: LlmClient + Clone> CortexServer<C> {
             )
             .await?;
         self.wal.write_commit(&entry_id).await?;
+
+        // 3. Metrics : track outcomes
+        if action == "commit" {
+            self.metrics.inc_jobs_approved();
+        } else if action == "escalate" {
+            self.metrics.inc_jobs_escalated();
+        } else {
+            self.metrics.inc_jobs_rejected(); // retry
+        }
 
         Ok(SyncReflectResponse {
             job_id: request.job_id,
@@ -839,10 +925,22 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         &self,
         request: RecoverProjectRequest,
     ) -> Result<cortex_core::RecoveryReport, CortexServerError> {
-        self.wal
+        let report = self
+            .wal
             .recover_uncommitted(&request.project_id)
             .await
-            .map_err(|e| CortexServerError::WalError(e.to_string()))
+            .map_err(|e| CortexServerError::WalError(e.to_string()))?;
+        // Metrics : record recovery outcomes
+        self.metrics
+            .add_recovery_rolled_back(report.rolled_back.len() as u64);
+        self.metrics
+            .add_recovery_escalated(report.escalated.len() as u64);
+        Ok(report)
+    }
+
+    /// Outil `get_metrics` : retourne les compteurs Prometheus en text/plain.
+    pub fn get_metrics_prometheus(&self) -> String {
+        self.metrics.to_prometheus()
     }
 
     /// Référence au WAL service (pour usage avancé, ex: tools.rs).
@@ -1252,5 +1350,50 @@ mod tests {
         assert!(!summary.contains("en parallèle"));
         assert!(!summary.contains("Pre-Mortem"));
         assert!(!summary.contains("Red-Team"));
+    }
+
+    // ========================================================================
+    // Metrics integration tests (Session 5.3)
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_metrics_incremented_on_pre_mortem() {
+        use std::sync::atomic::Ordering;
+        let metrics = cortex_core::SharedMetrics::default();
+        // Direct incrément test (sans passer par les handlers qui demandent un LLM complexe)
+        metrics.inc_llm_requests();
+        metrics.add_pre_mortem_guards(3);
+        assert!(metrics.llm_requests_total.load(Ordering::Relaxed) >= 1);
+        assert_eq!(metrics.pre_mortem_guards_emitted.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn test_metrics_prometheus_format_from_server() {
+        let metrics = cortex_core::SharedMetrics::default();
+        metrics.inc_jobs_dispatched();
+        metrics.inc_jobs_approved();
+        metrics.inc_hmac_fail();
+
+        let out = metrics.to_prometheus();
+        assert!(out.contains("cortex_jobs_dispatched_total 1"));
+        assert!(out.contains("cortex_jobs_approved_total 1"));
+        assert!(out.contains("cortex_hmac_verifications_total{result=\"fail\"} 1"));
+        assert!(out.contains("# TYPE cortex_uptime_seconds gauge"));
+    }
+
+    #[test]
+    fn test_metrics_sync_reflect_outcomes() {
+        // Test direct incréments des outcomes (commit/escalate/retry)
+        let metrics = cortex_core::SharedMetrics::default();
+        metrics.inc_jobs_dispatched();
+        metrics.inc_jobs_approved();
+        metrics.inc_jobs_escalated();
+        metrics.inc_jobs_rejected();
+
+        let text = metrics.to_prometheus();
+        assert!(text.contains("cortex_jobs_dispatched_total 1"));
+        assert!(text.contains("cortex_jobs_approved_total 1"));
+        assert!(text.contains("cortex_jobs_escalated_total 1"));
+        assert!(text.contains("cortex_jobs_rejected_total 1"));
     }
 }

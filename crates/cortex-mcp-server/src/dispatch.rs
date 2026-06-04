@@ -225,6 +225,15 @@ fn handle_tools_list() -> DispatchResult {
                 "required": ["project_id"]
             }
         }),
+        json!({
+            "name": "get_metrics",
+            "description": "Returns Prometheus-format metrics (text/plain) for observability. Includes counters for jobs dispatched/approved/rejected/escalated, red_team blocks, pre-mortem guards, HMAC verifications, recovery outcomes, LLM calls, and server uptime. No parameters.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }),
     ];
     Ok(json!({"tools": tools}))
 }
@@ -271,6 +280,7 @@ async fn handle_tools_call<C: LlmClient + Clone>(
         "rollback" => handle_rollback(server, arguments).await,
         "abort" => handle_abort(server, arguments).await,
         "recover_project" => handle_recover_project(server, arguments).await,
+        "get_metrics" => handle_get_metrics(server),
         _ => Err(JsonRpcError {
             code: METHOD_NOT_FOUND,
             message: format!("Unknown tool: {}", tool_name),
@@ -412,6 +422,11 @@ async fn handle_recover_project<C: LlmClient + Clone>(
         }
     })?;
     tool_response(response)
+}
+
+fn handle_get_metrics<C: LlmClient + Clone>(server: &CortexServer<C>) -> DispatchResult {
+    let text = server.get_metrics_prometheus();
+    Ok(json!({"content": [{"type": "text", "text": text}]}))
 }
 
 /// Handler red_team_audit : audit adversarial d'un artéfact.
@@ -621,7 +636,7 @@ mod tests {
     async fn test_handle_tools_list() {
         let result = handle_tools_list().expect("should succeed");
         let tools = result["tools"].as_array().expect("should be array");
-        assert_eq!(tools.len(), 11);
+        assert_eq!(tools.len(), 12);
 
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"get_routing_rules"));
