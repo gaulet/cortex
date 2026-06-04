@@ -105,6 +105,130 @@ pub struct HarvestInsightsResponse {
     pub insights: cortex_brains::insights::InsightsResult,
 }
 
+// =============================================================================
+// Worker lifecycle tools (Steps 2-6 of Session 4)
+// =============================================================================
+
+/// Requête pour l'outil `approve_and_execute`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApproveAndExecuteRequest {
+    pub project_id: String,
+    pub approved_by: String,
+    #[serde(default)]
+    pub plan: Option<cortex_brains::FractalPlan>,
+}
+
+/// Un thème prêt à être dispatché (avec ses dépendances résolues).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DispatchableTheme {
+    pub theme_id: String,
+    pub theme_name: String,
+    pub criticity_score: u8,
+    pub estimated_tokens: u32,
+    pub depends_on: Vec<String>,
+    pub guardrails_request: bool, // criticity ≥ 4
+    pub red_team_audit_request: bool, // criticity ≥ 3
+    pub tasks: Vec<cortex_brains::PlannedTask>,
+}
+
+/// Ordre de dispatch complet retourné à Hermes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DispatchOrder {
+    pub project_id: String,
+    pub phases: Vec<Vec<DispatchableTheme>>, // chaque phase = themes parallélisables
+    pub total_themes: u32,
+    pub total_estimated_tokens: u32,
+    pub cost_gating_summary: String,
+}
+
+/// Réponse de l'outil `approve_and_execute`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApproveAndExecuteResponse {
+    pub dispatch_order: DispatchOrder,
+    pub instructions: String, // Markdown lisible par user
+}
+
+/// Requête pour l'outil `sync_reflect`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncReflectRequest {
+    pub project_id: String,
+    pub job_id: String,
+    pub artifact: String,
+    pub definition_of_done: String,
+    #[serde(default)]
+    pub convergence_contract: Option<String>,
+}
+
+/// Réponse de l'outil `sync_reflect`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncReflectResponse {
+pub job_id: String,
+pub passed: bool,
+pub approved: bool, // = passed
+pub action: String, // "commit" | "retry" | "escalate"
+pub audit: RedTeamAuditResponse,
+}
+
+/// Requête pour l'outil `check_jobs_status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckJobsStatusRequest {
+    pub project_id: String,
+}
+
+/// Status d'un thème.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThemeStatus {
+    pub theme_id: String,
+    pub name: String,
+    pub criticity_score: u8,
+    pub tasks_count: u32,
+    pub jobs_status: String, // "pending" | "running" | "completed" | "failed"
+}
+
+/// Réponse de l'outil `check_jobs_status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckJobsStatusResponse {
+    pub project_id: String,
+    pub total_commits: u32,
+    pub last_commit_at: Option<i64>,
+    pub themes: Vec<ThemeStatus>,
+    pub handoff_summary: Option<String>,
+}
+
+/// Requête pour l'outil `rollback`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RollbackRequest {
+    pub project_id: String,
+    /// ID du commit cible (default: previous commit)
+    #[serde(default)]
+    pub target_commit_id: Option<String>,
+    pub reason: String,
+}
+
+/// Réponse de l'outil `rollback`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RollbackResponse {
+    pub project_id: String,
+    pub rolled_back_from: String,
+    pub rolled_back_to: String,
+    pub restored_state: serde_json::Value,
+}
+
+/// Requête pour l'outil `abort`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AbortRequest {
+    pub project_id: String,
+    pub reason: String,
+}
+
+/// Réponse de l'outil `abort`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AbortResponse {
+    pub project_id: String,
+    pub aborted: bool,
+    pub reason: String,
+    pub aborted_at: i64,
+}
 // ============================================================================
 // Erreurs spécifiques au serveur Cortex
 // ============================================================================
@@ -349,6 +473,337 @@ impl<C: LlmClient + Clone> CortexServer<C> {
 
         Ok(HarvestInsightsResponse { insights })
     }
+
+    // =========================================================================
+    // Worker lifecycle tools (Session 4)
+    // =========================================================================
+
+    /// Outil `approve_and_execute` : user a approuvé le plan, on génère
+    /// l'ordre de dispatch ordonné par phases parallélisables.
+    pub async fn approve_and_execute(
+        &self,
+        request: ApproveAndExecuteRequest,
+    ) -> Result<ApproveAndExecuteResponse, CortexServerError> {
+        // 1. Récupère le plan (depuis la requête ou depuis le state cache)
+        let plan = if let Some(p) = request.plan {
+            p
+        } else {
+            // Lookup dans WAL state cache
+            let state = self
+                .wal
+                .load_state(&request.project_id)
+                .await
+                .map_err(|e| CortexServerError::WalError(e.to_string()))?
+                .ok_or_else(|| {
+                    CortexServerError::ProjectNotFound(format!(
+                        "No plan found for project {} (state cache empty)",
+                        request.project_id
+                    ))
+                })?;
+            let snapshot = &state["plan"];
+            serde_json::from_value(snapshot.clone())
+                .map_err(|e| CortexServerError::InternalError(format!("Invalid cached plan: {}", e)))?
+        };
+
+        // 2. Log approval dans WAL
+        let entry_id = self
+            .wal
+            .write_prepare(
+                &request.project_id,
+                "approval_received",
+                None,
+                None,
+                &serde_json::json!({
+                    "approved_by": request.approved_by,
+                    "themes_count": plan.themes.len(),
+                }),
+            )
+            .await?;
+        self.wal.write_commit(&entry_id).await?;
+        self.wal
+            .write_snapshot_commit(
+                &request.project_id,
+                "execution_approved",
+                "approval_received",
+                &serde_json::json!({"approved_by": &request.approved_by}),
+                &serde_json::json!({"plan": &plan}),
+            )
+            .await?;
+
+        // 3. Build dispatch order (topological sort by phase)
+        let (phases, total_tokens) = build_dispatch_phases(&plan);
+        let total_themes = plan.themes.len() as u32;
+
+        // 4. Cost gating summary
+        let cost_summary = cortex_brains::CostGating::summarize(&plan);
+
+        let instructions = format!(
+            "## Plan approuvé ✓\n\
+             Projet : {}\n\
+             Approuvé par : {}\n\n\
+             **Phases d'exécution** : {} phases séquentielles\n\
+             **{} thèmes total, ~{} tokens estimés**\n\n\
+             ### Étapes\n\
+             1. Hermes spawn Phase 1 ({} thèmes en parallèle)\n\
+             2. À chaque job, vérifier criticité :\n   \
+                • ≥ 4 → appel pre_mortem avant dispatch\n   \
+                • ≥ 3 → red_team_audit après worker terminé\n\
+             3. Hermes appelle sync_reflect après chaque job\n\
+             4. Une fois Phase 1 complétée, spawn Phase 2, etc.\n\n\
+             {}\n",
+            request.project_id,
+            request.approved_by,
+            phases.len(),
+            total_themes,
+            total_tokens,
+            phases.first().map(|p| p.len()).unwrap_or(0),
+            cost_summary,
+        );
+
+        let dispatch_order = DispatchOrder {
+            project_id: request.project_id.clone(),
+            phases,
+            total_themes,
+            total_estimated_tokens: total_tokens,
+            cost_gating_summary: cost_summary,
+        };
+
+        Ok(ApproveAndExecuteResponse {
+            dispatch_order,
+            instructions,
+        })
+    }
+
+    /// Outil `sync_reflect` : Hermes appelle après worker terminé pour validation.
+    /// Wrapper qui appelle red_team_audit + enregistre dans WAL.
+    pub async fn sync_reflect(
+        &self,
+        request: SyncReflectRequest,
+    ) -> Result<SyncReflectResponse, CortexServerError> {
+        // 1. Run Red-Team audit
+        let audit = self
+            .red_team_audit(crate::server::RedTeamAuditRequest {
+                job_id: request.job_id.clone(),
+                definition_of_done: request.definition_of_done.clone(),
+                convergence_contract: request.convergence_contract.clone(),
+                guardrails: vec![],
+                artifact: request.artifact.clone(),
+            })
+            .await?;
+
+        // 2. Decide action
+        let action = if audit.passed {
+            "commit"
+        } else if audit.issues.iter().any(|i| i.severity == cortex_brains::red_team::Severity::Critical) {
+            "escalate"
+        } else {
+            "retry"
+        }
+        .to_string();
+
+        // 3. Log in WAL
+        let entry_id = self
+            .wal
+            .write_prepare(
+                &request.project_id,
+                "sync_reflect",
+                Some(&request.job_id),
+                None,
+                &serde_json::json!({
+                    "action": &action,
+                    "passed": audit.passed,
+                    "issues_count": audit.issues.len(),
+                }),
+            )
+            .await?;
+        self.wal.write_commit(&entry_id).await?;
+
+        Ok(SyncReflectResponse {
+            job_id: request.job_id,
+            passed: audit.passed,
+            approved: audit.passed,
+            action,
+            audit: audit,
+        })
+    }
+
+    /// Outil `check_jobs_status` : retourne l'état courant d'un projet.
+    pub async fn check_jobs_status(
+        &self,
+        request: CheckJobsStatusRequest,
+    ) -> Result<CheckJobsStatusResponse, CortexServerError> {
+        // 1. List commits (project history)
+        let commits = self
+            .wal
+            .list_commits(&request.project_id)
+            .await
+            .map_err(|e| CortexServerError::WalError(e.to_string()))?;
+        let last_commit_at = commits.first().map(|c| c.timestamp);
+        let total_commits = commits.len() as u32;
+
+        // 2. Load current state (plan, themes, etc.)
+        let state = self
+            .wal
+            .load_state(&request.project_id)
+            .await
+            .map_err(|e| CortexServerError::WalError(e.to_string()))?;
+        let handoff_summary = state
+            .as_ref()
+            .and_then(|s| s.get("handoff_summary").and_then(|v| v.as_str()))
+            .map(String::from);
+
+        // 3. Build theme status list
+        let themes: Vec<ThemeStatus> = if let Some(state) = state {
+            if let Some(plan) = state.get("plan") {
+                if let Ok(plan) =
+                    serde_json::from_value::<cortex_brains::FractalPlan>(plan.clone())
+                {
+                    plan.themes
+                        .iter()
+                        .map(|t| {
+                            // Check if there's a sync_reflect commit for this theme's first task
+                            let jobs_status =
+                                infer_theme_status(&commits, &t.id, &t.tasks);
+                            ThemeStatus {
+                                theme_id: t.id.clone(),
+                                name: t.name.clone(),
+                                criticity_score: t.criticity_score,
+                                tasks_count: t.tasks.len() as u32,
+                                jobs_status,
+                            }
+                        })
+                        .collect()
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        };
+
+        Ok(CheckJobsStatusResponse {
+            project_id: request.project_id,
+            total_commits,
+            last_commit_at,
+            themes,
+            handoff_summary,
+        })
+    }
+
+    /// Outil `rollback` : restore un état précédent d'un projet.
+    pub async fn rollback(
+        &self,
+        request: RollbackRequest,
+    ) -> Result<RollbackResponse, CortexServerError> {
+        let commits = self
+            .wal
+            .list_commits(&request.project_id)
+            .await
+            .map_err(|e| CortexServerError::WalError(e.to_string()))?;
+        if commits.len() < 2 && request.target_commit_id.is_none() {
+            return Err(CortexServerError::ValidationError(
+                "Cannot rollback: project has fewer than 2 commits".to_string(),
+            ));
+        }
+
+        let current_commit_id = commits
+            .first()
+            .map(|c| c.commit_id.clone())
+            .ok_or_else(|| CortexServerError::ProjectNotFound(request.project_id.clone()))?;
+
+        let target = if let Some(t) = request.target_commit_id {
+            commits
+                .iter()
+                .find(|c| c.commit_id == t)
+                .ok_or_else(|| {
+                    CortexServerError::ValidationError(format!("commit {} not found", t))
+                })?
+                .clone()
+        } else {
+            // Default = previous commit
+            commits
+                .get(1)
+                .ok_or_else(|| {
+                    CortexServerError::ValidationError("No previous commit".to_string())
+                })?
+                .clone()
+        };
+
+        // Restore state
+        self.wal
+            .save_state(
+                &request.project_id,
+                &target.snapshot,
+                Some(&format!("Rolled back to {}: {}", target.commit_id, request.reason)),
+            )
+            .await
+            .map_err(|e| CortexServerError::WalError(e.to_string()))?;
+
+        // Log rollback
+        let entry_id = self
+            .wal
+            .write_prepare(
+                &request.project_id,
+                "rollback",
+                None,
+                None,
+                &serde_json::json!({
+                    "from": &current_commit_id,
+                    "to": &target.commit_id,
+                    "reason": &request.reason,
+                }),
+            )
+            .await?;
+        self.wal.write_commit(&entry_id).await?;
+
+        Ok(RollbackResponse {
+            project_id: request.project_id,
+            rolled_back_from: current_commit_id,
+            rolled_back_to: target.commit_id,
+            restored_state: target.snapshot,
+        })
+    }
+
+    /// Outil `abort` : emergency stop d'un projet.
+    pub async fn abort(
+        &self,
+        request: AbortRequest,
+    ) -> Result<AbortResponse, CortexServerError> {
+        let now = chrono::Utc::now().timestamp_millis();
+
+        let entry_id = self
+            .wal
+            .write_prepare(
+                &request.project_id,
+                "abort",
+                None,
+                None,
+                &serde_json::json!({
+                    "reason": &request.reason,
+                    "aborted_at": now,
+                }),
+            )
+            .await?;
+        self.wal.write_commit(&entry_id).await?;
+        self.wal
+            .write_snapshot_commit(
+                &request.project_id,
+                "aborted",
+                "abort",
+                &serde_json::json!({"reason": &request.reason}),
+                &serde_json::json!({"status": "aborted", "aborted_at": now}),
+            )
+            .await?;
+
+        Ok(AbortResponse {
+            project_id: request.project_id,
+            aborted: true,
+            reason: request.reason,
+            aborted_at: now,
+        })
+    }
     /// Référence au WAL service (pour usage avancé, ex: tools.rs).
     pub fn wal(&self) -> &WalService {
         &self.wal
@@ -415,6 +870,139 @@ fn build_summary(plan: &FractalPlan) -> String {
     }
 
     parts.join(" · ")
+}
+
+// ============================================================================
+// Helpers (private) — Dispatch topology + status inference
+// ============================================================================
+
+use cortex_brains::PlannedTheme;
+use cortex_core::CortexCommit;
+
+/// Topological sort des themes en phases parallélisables.
+///
+/// Algorithme : Kahn's algorithm simplifié.
+fn build_dispatch_phases(plan: &cortex_brains::FractalPlan) -> (Vec<Vec<DispatchableTheme>>, u32) {
+    let mut remaining: Vec<PlannedTheme> = plan.themes.clone();
+    let mut phases: Vec<Vec<DispatchableTheme>> = Vec::new();
+    let mut total_tokens: u32 = 0;
+
+    while !remaining.is_empty() {
+        // IDs de tous les themes déjà placés dans phases antérieures
+        let prev_ids: Vec<String> = phases
+            .iter()
+            .flatten()
+            .map(|d| d.theme_id.clone())
+            .collect();
+
+        // Phase courante : themes dont TOUTES les dépendances sont déjà dans phases antérieures
+        let mut in_phase: Vec<PlannedTheme> = Vec::new();
+        let mut still_remaining: Vec<PlannedTheme> = Vec::new();
+        for t in remaining.into_iter() {
+            let mut all_ok = true;
+            for dep in &t.depends_on {
+                if prev_ids.contains(dep) {
+                    continue;
+                }
+                // dep n'est pas dans prev_ids → check si dans remaining
+                let in_remaining = still_remaining
+                    .iter()
+                    .chain(in_phase.iter())
+                    .any(|x| &x.id == dep);
+                if in_remaining {
+                    all_ok = false;
+                    break;
+                }
+            }
+            if all_ok {
+                in_phase.push(t);
+            } else {
+                still_remaining.push(t);
+            }
+        }
+
+        // 4. Always reassign `remaining` at the end of the loop body so
+        //    the while-condition is well-defined even on the `continue` path.
+        if in_phase.is_empty() {
+            // Cycle / cassé — force le premier pour ne pas boucler
+            let theme = still_remaining.remove(0);
+            let dt = theme_to_dispatchable(&theme, true);
+            total_tokens += dt.estimated_tokens;
+            phases.push(vec![dt]);
+            remaining = still_remaining;
+            continue;
+        }
+
+        let mut phase_themes: Vec<DispatchableTheme> = Vec::new();
+        for t in in_phase {
+            let dt = theme_to_dispatchable(&t, false);
+            total_tokens += dt.estimated_tokens;
+            phase_themes.push(dt);
+        }
+        phases.push(phase_themes);
+        remaining = still_remaining;
+    }
+
+    (phases, total_tokens)
+}
+
+fn theme_to_dispatchable(theme: &PlannedTheme, forced: bool) -> DispatchableTheme {
+    let criticity = theme.criticity_score;
+    let estimated = cortex_brains::CostGating::estimate_tokens(criticity);
+
+    DispatchableTheme {
+        theme_id: theme.id.clone(),
+        theme_name: theme.name.clone(),
+        criticity_score: criticity,
+        estimated_tokens: estimated,
+        depends_on: theme.depends_on.clone(),
+        guardrails_request: criticity >= 4 || forced,
+        red_team_audit_request: criticity >= 3,
+        tasks: theme.tasks.clone(),
+    }
+}
+
+/// Infère le status d'un thème depuis l'historique des commits.
+fn infer_theme_status(
+    commits: &[CortexCommit],
+    theme_id: &str,
+    _tasks: &[cortex_brains::PlannedTask],
+) -> String {
+    let mut approved = 0;
+    let mut escalated = 0;
+    let mut last_was_abort = false;
+
+    for c in commits {
+        if let Some(tid) = c.diff.get("theme_id").and_then(|v| v.as_str()) {
+            if tid == theme_id {
+                match c.mutation_type.as_str() {
+                    "sync_reflect" | "task_completed" => {
+                        if c.diff.get("passed").and_then(|v| v.as_bool()) == Some(true) {
+                            approved += 1;
+                        } else if c.diff.get("action").and_then(|v| v.as_str())
+                            == Some("escalate")
+                        {
+                            escalated += 1;
+                        }
+                    }
+                    "abort" => {
+                        last_was_abort = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if last_was_abort {
+        "failed".to_string()
+    } else if escalated > 0 {
+        "failed".to_string()
+    } else if approved > 0 {
+        "completed".to_string()
+    } else {
+        "pending".to_string()
+    }
 }
 
 // ============================================================================

@@ -152,6 +152,70 @@ fn handle_tools_list() -> DispatchResult {
                 "required": ["theme_id", "theme_name", "jobs_summary"]
             }
         }),
+        json!({
+            "name": "approve_and_execute",
+            "description": "User has approved the FractalPlan. Returns a phased dispatch order (parallelizable themes per phase) with criticity-aware brain activation flags. Logged in WAL.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string"},
+                    "approved_by": {"type": "string"},
+                    "plan": {"type": "object", "description": "Optional plan override; default loads from WAL state cache"}
+                },
+                "required": ["project_id", "approved_by"]
+            }
+        }),
+        json!({
+            "name": "sync_reflect",
+            "description": "After a worker finishes a job, Hermes calls this to validate. Runs Red-Team audit and returns action: commit | retry | escalate.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string"},
+                    "job_id": {"type": "string"},
+                    "artifact": {"type": "string", "description": "Worker output (diff, log, summary)"},
+                    "definition_of_done": {"type": "string"},
+                    "convergence_contract": {"type": "string"}
+                },
+                "required": ["project_id", "job_id", "artifact", "definition_of_done"]
+            }
+        }),
+        json!({
+            "name": "check_jobs_status",
+            "description": "Returns current state of a project: commit count, last commit timestamp, theme statuses (pending/running/completed/failed).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string"}
+                },
+                "required": ["project_id"]
+            }
+        }),
+        json!({
+            "name": "rollback",
+            "description": "Restores project state to a previous commit. Default: previous commit. Specify target_commit_id to rollback further.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string"},
+                    "target_commit_id": {"type": "string", "description": "Optional explicit commit target"},
+                    "reason": {"type": "string"}
+                },
+                "required": ["project_id", "reason"]
+            }
+        }),
+        json!({
+            "name": "abort",
+            "description": "Emergency stop: marks project as aborted, all subsequent dispatch attempts are blocked. Records reason and timestamp in WAL.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string"},
+                    "reason": {"type": "string"}
+                },
+                "required": ["project_id", "reason"]
+            }
+        }),
     ];
     Ok(json!({"tools": tools}))
 }
@@ -192,6 +256,11 @@ async fn handle_tools_call<C: LlmClient + Clone>(
         "pre_mortem" => handle_pre_mortem(server, arguments).await,
         "red_team_audit" => handle_red_team_audit(server, arguments).await,
         "harvest_insights" => handle_harvest_insights(server, arguments).await,
+        "approve_and_execute" => handle_approve_and_execute(server, arguments).await,
+        "sync_reflect" => handle_sync_reflect(server, arguments).await,
+        "check_jobs_status" => handle_check_jobs_status(server, arguments).await,
+        "rollback" => handle_rollback(server, arguments).await,
+        "abort" => handle_abort(server, arguments).await,
         _ => Err(JsonRpcError {
             code: METHOD_NOT_FOUND,
             message: format!("Unknown tool: {}", tool_name),
@@ -371,6 +440,117 @@ async fn handle_harvest_insights<C: LlmClient + Clone>(
     }]}))
 }
 
+// ----------------------------------------------------------------------------
+// Worker lifecycle tools (Session 4)
+// ----------------------------------------------------------------------------
+
+/// Helper : package une réponse de tool MCP en `content`/`text`.
+fn tool_response<T: serde::Serialize>(response: T) -> DispatchResult {
+    let content = serde_json::to_value(&response).map_err(|e| JsonRpcError {
+        code: crate::protocol::INTERNAL_ERROR,
+        message: format!("serialization failed: {}", e),
+        data: None,
+    })?;
+    Ok(json!({"content": [{
+        "type": "text",
+        "text": serde_json::to_string_pretty(&content).unwrap()
+    }]}))
+}
+
+async fn handle_approve_and_execute<C: LlmClient + Clone>(
+    server: &CortexServer<C>,
+    arguments: JsonValue,
+) -> DispatchResult {
+    let request = serde_json::from_value::<crate::server::ApproveAndExecuteRequest>(arguments)
+        .map_err(|e| JsonRpcError {
+            code: INVALID_PARAMS,
+            message: format!("Invalid params for approve_and_execute: {}", e),
+            data: None,
+        })?;
+    let response = server.approve_and_execute(request).await.map_err(|e| {
+        JsonRpcError {
+            code: crate::protocol::INTERNAL_ERROR,
+            message: format!("approve_and_execute failed: {}", e),
+            data: None,
+        }
+    })?;
+    tool_response(response)
+}
+
+async fn handle_sync_reflect<C: LlmClient + Clone>(
+    server: &CortexServer<C>,
+    arguments: JsonValue,
+) -> DispatchResult {
+    let request = serde_json::from_value::<crate::server::SyncReflectRequest>(arguments)
+        .map_err(|e| JsonRpcError {
+            code: INVALID_PARAMS,
+            message: format!("Invalid params for sync_reflect: {}", e),
+            data: None,
+        })?;
+    let response = server.sync_reflect(request).await.map_err(|e| JsonRpcError {
+        code: crate::protocol::INTERNAL_ERROR,
+        message: format!("sync_reflect failed: {}", e),
+        data: None,
+    })?;
+    tool_response(response)
+}
+
+async fn handle_check_jobs_status<C: LlmClient + Clone>(
+    server: &CortexServer<C>,
+    arguments: JsonValue,
+) -> DispatchResult {
+    let request = serde_json::from_value::<crate::server::CheckJobsStatusRequest>(arguments)
+        .map_err(|e| JsonRpcError {
+            code: INVALID_PARAMS,
+            message: format!("Invalid params for check_jobs_status: {}", e),
+            data: None,
+        })?;
+    let response = server.check_jobs_status(request).await.map_err(|e| {
+        JsonRpcError {
+            code: crate::protocol::INTERNAL_ERROR,
+            message: format!("check_jobs_status failed: {}", e),
+            data: None,
+        }
+    })?;
+    tool_response(response)
+}
+
+async fn handle_rollback<C: LlmClient + Clone>(
+    server: &CortexServer<C>,
+    arguments: JsonValue,
+) -> DispatchResult {
+    let request = serde_json::from_value::<crate::server::RollbackRequest>(arguments)
+        .map_err(|e| JsonRpcError {
+            code: INVALID_PARAMS,
+            message: format!("Invalid params for rollback: {}", e),
+            data: None,
+        })?;
+    let response = server.rollback(request).await.map_err(|e| JsonRpcError {
+        code: crate::protocol::INTERNAL_ERROR,
+        message: format!("rollback failed: {}", e),
+        data: None,
+    })?;
+    tool_response(response)
+}
+
+async fn handle_abort<C: LlmClient + Clone>(
+    server: &CortexServer<C>,
+    arguments: JsonValue,
+) -> DispatchResult {
+    let request = serde_json::from_value::<crate::server::AbortRequest>(arguments)
+        .map_err(|e| JsonRpcError {
+            code: INVALID_PARAMS,
+            message: format!("Invalid params for abort: {}", e),
+            data: None,
+        })?;
+    let response = server.abort(request).await.map_err(|e| JsonRpcError {
+        code: crate::protocol::INTERNAL_ERROR,
+        message: format!("abort failed: {}", e),
+        data: None,
+    })?;
+    tool_response(response)
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -417,7 +597,7 @@ mod tests {
     async fn test_handle_tools_list() {
         let result = handle_tools_list().expect("should succeed");
         let tools = result["tools"].as_array().expect("should be array");
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 10);
 
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"get_routing_rules"));

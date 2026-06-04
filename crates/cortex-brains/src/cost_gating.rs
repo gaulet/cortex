@@ -28,6 +28,32 @@ impl CostGating {
         let red_team = if Self::should_run_red_team(criticity) { 2500 } else { 0 };
         pre_mortem + red_team
     }
+
+    /// Résumé user-friendly de l'activation des brains pour un plan complet.
+    pub fn summarize(plan: &crate::FractalPlan) -> String {
+        let total_pre_mortem = plan
+            .themes
+            .iter()
+            .filter(|t| Self::should_run_pre_mortem(t.criticity_score))
+            .count();
+        let total_red_team = plan
+            .themes
+            .iter()
+            .filter(|t| Self::should_run_red_team(t.criticity_score))
+            .count();
+        let total_tokens: u32 = plan
+            .themes
+            .iter()
+            .map(|t| Self::estimate_tokens(t.criticity_score))
+            .sum();
+
+        format!(
+            "**Coût total** : ~{} tokens\n\
+             **{} thème(s) avec Pre-Mortem activé** (criticité ≥ 4)\n\
+             **{} thème(s) avec Red-Team activé** (criticité ≥ 3)\n",
+            total_tokens, total_pre_mortem, total_red_team
+        )
+    }
 }
 
 /// Decision struct returned by `activate_brains_for_job`.
