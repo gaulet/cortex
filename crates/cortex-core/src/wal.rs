@@ -43,7 +43,7 @@
 //! placeholders `$1, $2, ...` (au lieu de `?` pour SQLite) et des types
 //! natifs Postgres (BIGINT, JSONB, BOOLEAN).
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sqlx::Row;
@@ -908,6 +908,80 @@ impl WalService {
         }
     }
 
+    /// Session 7 (philosophie vue-ensemble.md) : archive proprement
+    /// les entries committed plus vieilles que `older_than`.
+    ///
+    /// Retourne le nombre d'entries supprimées.
+    ///
+    /// # Pourquoi
+    /// La philosophie dit "Il archive proprement ce qui est terminé"
+    /// (vue d'ensemble.md, super-pouvoir #5). Sans ça, le SQLite/PG
+    /// grossit sans bound pour un long-running server.
+    ///
+    /// # Sécurité
+    /// - Ne supprime QUE les entries `committed = 1` (jamais les
+    ///   uncommitted, qui doivent être processed par recover_uncommitted)
+    /// - Ne supprime QUE les entries strictement plus vieilles que
+    ///   `older_than` (`<` strict, pas `<=`)
+    /// - Le cutoff est paramétrable (défaut recommandé : 30 jours)
+    ///
+    /// # Backend dispatch
+    /// - SQLite : `created_at` est en `unixepoch()` (secondes)
+    /// - Postgres : `created_at` est en `EXTRACT(EPOCH FROM NOW()) * 1000`
+    ///   (millisecondes)
+    pub async fn purge_committed_entries(&self, older_than: DateTime<Utc>) -> Result<usize> {
+        if self.backend_kind == BackendKind::Sqlite {
+            #[cfg(feature = "sqlite")]
+            {
+                let ts = older_than.timestamp(); // secondes depuis epoch
+                let pool = self
+                    .sqlite_pool
+                    .as_ref()
+                    .ok_or_else(|| CortexError::WalError("SQLite pool not initialized".into()))?;
+                let result =
+                    sqlx::query("DELETE FROM wal_entries WHERE committed = 1 AND created_at < ?")
+                        .bind(ts)
+                        .execute(pool)
+                        .await
+                        .map_err(|e| {
+                            CortexError::WalError(format!(
+                                "purge_committed_entries (sqlite) failed: {}",
+                                e
+                            ))
+                        })?;
+                return Ok(result.rows_affected() as usize);
+            }
+            #[cfg(not(feature = "sqlite"))]
+            return Err(CortexError::WalError("SQLite feature disabled".into()));
+        }
+        if self.backend_kind == BackendKind::Postgres {
+            #[cfg(feature = "postgres")]
+            {
+                let ts = older_than.timestamp_millis(); // millisecondes
+                let pool = self
+                    .postgres_pool
+                    .as_ref()
+                    .ok_or_else(|| CortexError::WalError("Postgres pool not initialized".into()))?;
+                let result = sqlx::query(
+                    "DELETE FROM wal_entries WHERE committed = true AND created_at < $1",
+                )
+                .bind(ts)
+                .execute(pool)
+                .await
+                .map_err(|e| {
+                    CortexError::WalError(format!(
+                        "purge_committed_entries (postgres) failed: {}",
+                        e
+                    ))
+                })?;
+                return Ok(result.rows_affected() as usize);
+            }
+            #[cfg(not(feature = "postgres"))]
+            return Err(CortexError::WalError("Postgres feature disabled".into()));
+        }
+        Err(CortexError::WalError("Unsupported backend".into()))
+    }
+
     #[cfg(feature = "sqlite")]
     async fn list_commits_sqlite(&self, project_id: &str) -> Result<Vec<sqlx::sqlite::SqliteRow>> {
         let pool = self
@@ -1430,6 +1504,143 @@ mod tests {
         let latest = wal.latest_commit("proj_sc").await.expect("latest");
         assert!(latest.is_some());
         assert_eq!(latest.unwrap().commit_id, commit_id);
+    }
+
+    // ============================================================
+    // Session 7 : purge_committed_entries test
+    // ============================================================
+    //
+    // Philosophie vue-ensemble.md : "Il archive proprement ce qui
+    // est terminé". Sans cleanup, le SQLite grossit sans bound.
+
+    #[tokio::test]
+    async fn test_purge_committed_entries_deletes_only_old_committed() {
+        use chrono::Duration;
+
+        let wal = test_wal().await;
+
+        // 1. Créer 3 entries
+        // entry_old_committed : committed, 100 jours (sera purgé)
+        // entry_recent_committed : committed, aujourd'hui (NE sera PAS purgé)
+        // entry_old_uncommitted : uncommitted, 100 jours (NE sera PAS purgé)
+        let entry_old = wal
+            .write_prepare(
+                "proj_purge",
+                "test",
+                None,
+                None,
+                &serde_json::json!({"id": 1}),
+            )
+            .await
+            .expect("write_prepare old");
+        let entry_recent = wal
+            .write_prepare(
+                "proj_purge",
+                "test",
+                None,
+                None,
+                &serde_json::json!({"id": 2}),
+            )
+            .await
+            .expect("write_prepare recent");
+        let entry_old_uncommitted = wal
+            .write_prepare(
+                "proj_purge",
+                "test",
+                None,
+                None,
+                &serde_json::json!({"id": 3}),
+            )
+            .await
+            .expect("write_prepare old uncommitted");
+
+        // 2. Commit les 2 premières
+        wal.write_commit(&entry_old).await.expect("commit old");
+        wal.write_commit(&entry_recent)
+            .await
+            .expect("commit recent");
+        // entry_old_uncommitted reste committed=0
+
+        // 3. Update created_at pour entry_old (100 jours dans le passé)
+        let old_ts = (chrono::Utc::now() - Duration::days(100)).timestamp();
+        sqlx::query("UPDATE wal_entries SET created_at = ? WHERE entry_id = ?")
+            .bind(old_ts)
+            .bind(&entry_old)
+            .execute(wal.sqlite_pool.as_ref().unwrap())
+            .await
+            .expect("update old");
+        // entry_old_uncommitted aussi
+        sqlx::query("UPDATE wal_entries SET created_at = ? WHERE entry_id = ?")
+            .bind(old_ts)
+            .bind(&entry_old_uncommitted)
+            .execute(wal.sqlite_pool.as_ref().unwrap())
+            .await
+            .expect("update old uncommitted");
+
+        // 4. Purge avec cutoff = 30 jours
+        let cutoff = chrono::Utc::now() - Duration::days(30);
+        let deleted = wal.purge_committed_entries(cutoff).await.expect("purge");
+
+        // 5. Assert : 1 entry supprimée (entry_old), 2 restantes
+        assert_eq!(deleted, 1, "should delete 1 entry, not {}", deleted);
+
+        // 6. Vérifier que entry_old_uncommitted est toujours là (uncommitted)
+        let remaining = wal
+            .list_uncommitted("proj_purge")
+            .await
+            .expect("list uncommitted");
+        assert!(
+            remaining
+                .iter()
+                .any(|e| e.entry_id == entry_old_uncommitted),
+            "uncommitted old entry should NOT be purged"
+        );
+
+        // 7. entry_recent (committed) doit toujours exister
+        let recent_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM wal_entries WHERE entry_id = ?")
+                .bind(&entry_recent)
+                .fetch_one(wal.sqlite_pool.as_ref().unwrap())
+                .await
+                .expect("count recent");
+        assert_eq!(
+            recent_count, 1,
+            "recent committed entry should NOT be purged"
+        );
+
+        // 8. entry_old (committed old) doit avoir été supprimé
+        let old_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM wal_entries WHERE entry_id = ?")
+                .bind(&entry_old)
+                .fetch_one(wal.sqlite_pool.as_ref().unwrap())
+                .await
+                .expect("count old");
+        assert_eq!(old_count, 0, "old committed entry should be purged");
+    }
+
+    #[tokio::test]
+    async fn test_purge_committed_entries_returns_zero_when_nothing_old() {
+        let wal = test_wal().await;
+        let entry = wal
+            .write_prepare("proj_purge2", "test", None, None, &serde_json::json!({}))
+            .await
+            .expect("write");
+        wal.write_commit(&entry).await.expect("commit");
+
+        // Cutoff = maintenant → rien n'est plus vieux
+        let deleted = wal
+            .purge_committed_entries(chrono::Utc::now())
+            .await
+            .expect("purge");
+        assert_eq!(deleted, 0, "should delete 0 entries (none older than now)");
+
+        // L'entry est toujours là
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM wal_entries WHERE entry_id = ?")
+            .bind(&entry)
+            .fetch_one(wal.sqlite_pool.as_ref().unwrap())
+            .await
+            .expect("count");
+        assert_eq!(count, 1, "entry should still exist");
     }
 
     // ============================================================
