@@ -89,6 +89,26 @@ pub struct CortexCommit {
     pub checksum: String,
 }
 
+/// Politique appliquée à une entry uncommitted pendant la recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryAction {
+    /// Commit l'entry (action terminale, safe à finaliser)
+    Commit,
+    /// Rollback l'entry (safe default, marqué dans le WAL)
+    Rollback,
+    /// Escalader (laisser uncommitted, intervention humaine requise)
+    Escalate,
+}
+
+/// Rapport de recovery post-crash pour un projet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryReport {
+    pub project_id: String,
+    pub uncommitted_count: usize,
+    pub rolled_back: Vec<String>, // entry_ids rolled back
+    pub escalated: Vec<String>,   // entry_ids escalated
+}
+
 /// Service WAL pour gestion persistance et crash recovery.
 #[derive(Clone)]
 pub struct WalService {
@@ -185,6 +205,76 @@ impl WalService {
         .map_err(|e| CortexError::WalError(format!("migration cortex_states failed: {}", e)))?;
 
         Ok(())
+    }
+
+    /// Recover uncommitted WAL entries and decide what to do with each.
+    ///
+    /// Typical crash recovery flow :
+    /// 1. Serveur plante après write_prepare mais avant write_commit
+    /// 2. Au redémarrage, list_uncommitted() retourne ces prepares
+    /// 3. Pour chaque entry, l'app décide : commit, rollback, ou escalate
+    ///
+    /// Cette méthode :
+    /// - Liste les entries uncommitted pour un projet
+    /// - Pour les entries "atomiques" (write_prepare isolé, sans commit), les rollback automatiquement
+    ///   (les marke comme rolled_back via une action `recovery_rollback` dans le WAL)
+    /// - Retourne la liste des actions prises
+    ///
+    /// Note : les "transactional" entries (write_snapshot_commit) sont déjà
+    /// atomiques, donc elles n'apparaissent jamais dans uncommitted.
+    pub async fn recover_uncommitted(
+        &self,
+        project_id: &str,
+    ) -> Result<RecoveryReport> {
+        let uncommitted = self.list_uncommitted(project_id).await?;
+        let mut report = RecoveryReport {
+            project_id: project_id.to_string(),
+            uncommitted_count: uncommitted.len(),
+            rolled_back: Vec::new(),
+            escalated: Vec::new(),
+        };
+
+        for entry in uncommitted {
+            // Politiques de recovery par type d'action :
+            //   approval_received → committer (le user a approuvé, on finalise)
+            //   sync_reflect, task_completed, rollout → escalated (l'output worker est manquant)
+            //   abort, rollback → committer (action terminal, pas de demi-état)
+            //   * (default) → rolled back (safe default)
+            let policy = match entry.action.as_str() {
+                "approval_received" => RecoveryAction::Commit,
+                "abort" | "rollback" | "recovery_rollback" => RecoveryAction::Commit,
+                "sync_reflect" | "task_completed" | "rollout" => RecoveryAction::Escalate,
+                _ => RecoveryAction::Rollback,
+            };
+
+            match policy {
+                RecoveryAction::Commit => {
+                    self.write_commit(&entry.entry_id).await?;
+                }
+                RecoveryAction::Rollback => {
+                    // Marque comme rolled_back (ne change pas committed, mais ajoute
+                    // un commit "recovery_rollback" pour traçabilité)
+                    self.write_prepare(
+                        project_id,
+                        "recovery_rollback",
+                        entry.job_id.as_deref(),
+                        entry.theme_id.as_deref(),
+                        &serde_json::json!({
+                            "rolled_back_entry": &entry.entry_id,
+                            "original_action": &entry.action,
+                        }),
+                    )
+                    .await?;
+                    report.rolled_back.push(entry.entry_id);
+                }
+                RecoveryAction::Escalate => {
+                    // On laisse uncommitted pour escalade humaine
+                    report.escalated.push(entry.entry_id);
+                }
+            }
+        }
+
+        Ok(report)
     }
 
     /// Écrit une entrée WAL préparée (mutation en attente).
@@ -674,5 +764,153 @@ mod tests {
         let wal = test_wal().await;
         let state = wal.load_state("nonexistent").await.unwrap();
         assert!(state.is_none());
+    }
+
+    // ========================================================================
+    // Crash recovery tests (Session 5)
+    // ========================================================================
+
+    /// Helper pour les tests : crée un fichier SQLite temp unique par test.
+    async fn test_wal_file() -> WalService {
+        use std::env;
+        let tmp = env::temp_dir().join(format!(
+            "cortex_wal_recovery_{}.db",
+            uuid::Uuid::now_v7()
+        ));
+        let url = format!("sqlite://{}?mode=rwc", tmp.display());
+        WalService::connect(&url)
+            .await
+            .expect("file-based WAL should connect")
+    }
+
+    #[tokio::test]
+    async fn test_crash_recovery_rollback_unknown_action() {
+        let wal = test_wal().await;
+        // Simule un crash après write_prepare, avant write_commit
+        let e1 = wal
+            .write_prepare("proj_crash", "theme_added", None, None, &json!({"x": 1}))
+            .await
+            .unwrap();
+        assert!(!wal.read_entry(&e1).await.unwrap().committed);
+
+        // Crash simulé : nouveau serveur, recovery
+        let report = wal.recover_uncommitted("proj_crash").await.unwrap();
+        assert_eq!(report.uncommitted_count, 1);
+        assert_eq!(report.rolled_back.len(), 1);
+        assert_eq!(report.escalated.len(), 0);
+        assert_eq!(report.rolled_back[0], e1);
+    }
+
+    #[tokio::test]
+    async fn test_crash_recovery_commit_terminal_action() {
+        let wal = test_wal().await;
+        // approval_received et abort sont commit-on-recovery (safe à finaliser)
+        let e1 = wal
+            .write_prepare("proj_t", "approval_received", None, None, &json!({}))
+            .await
+            .unwrap();
+        let e2 = wal
+            .write_prepare("proj_t", "abort", None, None, &json!({}))
+            .await
+            .unwrap();
+
+        let report = wal.recover_uncommitted("proj_t").await.unwrap();
+        assert_eq!(report.rolled_back.len(), 0);
+        assert_eq!(report.escalated.len(), 0);
+        // Les deux entries doivent être committées
+        assert!(wal.read_entry(&e1).await.unwrap().committed);
+        assert!(wal.read_entry(&e2).await.unwrap().committed);
+    }
+
+    #[tokio::test]
+    async fn test_crash_recovery_escalate_in_flight() {
+        let wal = test_wal().await;
+        // sync_reflect et task_completed sont in-flight : escalate (intervention humaine)
+        let e1 = wal
+            .write_prepare(
+                "proj_e",
+                "sync_reflect",
+                Some("job-1"),
+                None,
+                &json!({"artifact": "x"}),
+            )
+            .await
+            .unwrap();
+        let e2 = wal
+            .write_prepare(
+                "proj_e",
+                "task_completed",
+                None,
+                Some("theme-1"),
+                &json!({}),
+            )
+            .await
+            .unwrap();
+
+        let report = wal.recover_uncommitted("proj_e").await.unwrap();
+        assert_eq!(report.rolled_back.len(), 0);
+        assert_eq!(report.escalated.len(), 2);
+        assert!(report.escalated.contains(&e1));
+        assert!(report.escalated.contains(&e2));
+        // Toujours uncommitted après recovery (escalate ne commit pas)
+        assert!(!wal.read_entry(&e1).await.unwrap().committed);
+    }
+
+    #[tokio::test]
+    async fn test_crash_recovery_file_persistence() {
+        // Test crucial : recovery fonctionne après restart du serveur.
+        // On utilise une DB fichier qu'on ferme et rouvre.
+        use std::env;
+        let tmp = env::temp_dir().join(format!(
+            "cortex_wal_persist_{}.db",
+            uuid::Uuid::now_v7()
+        ));
+        let url = format!("sqlite://{}?mode=rwc", tmp.display());
+
+        // Session 1 : write_prepare, sans commit
+        {
+            let wal = WalService::connect(&url).await.unwrap();
+            wal.write_prepare("p", "theme_added", None, None, &json!({}))
+                .await
+                .unwrap();
+            // pas de write_commit → simule crash
+        }
+
+        // Session 2 : nouvelle instance, recovery
+        {
+            let wal = WalService::connect(&url).await.unwrap();
+            // Avant recovery : entry est là, uncommitted
+            let uncommitted = wal.list_uncommitted("p").await.unwrap();
+            assert_eq!(uncommitted.len(), 1);
+
+            // Recovery → rollback policy
+            let report = wal.recover_uncommitted("p").await.unwrap();
+            assert_eq!(report.rolled_back.len(), 1);
+        }
+
+        // Cleanup
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_crash_recovery_mixed_actions() {
+        let wal = test_wal().await;
+        // Mix des 3 politiques
+        wal.write_prepare("mix", "approval_received", None, None, &json!({}))
+            .await
+            .unwrap();
+        wal.write_prepare("mix", "sync_reflect", Some("j1"), None, &json!({}))
+            .await
+            .unwrap();
+        wal.write_prepare("mix", "theme_added", None, None, &json!({}))
+            .await
+            .unwrap();
+
+        let report = wal.recover_uncommitted("mix").await.unwrap();
+        assert_eq!(report.uncommitted_count, 3);
+        assert_eq!(report.rolled_back.len(), 1); // theme_added
+        assert_eq!(report.escalated.len(), 1); // sync_reflect
+        // approval_received ne génère ni rolled_back ni escalated (commit silencieux)
+        assert_eq!(report.rolled_back.len() + report.escalated.len(), 2);
     }
 }

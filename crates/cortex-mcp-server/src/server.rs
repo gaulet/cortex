@@ -229,6 +229,14 @@ pub struct AbortResponse {
     pub reason: String,
     pub aborted_at: i64,
 }
+
+/// Requête pour l'outil `recover_project` (crash recovery).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoverProjectRequest {
+    pub project_id: String,
+}
+
+/// Réponse de l'outil `recover_project` — utilise `cortex_core::RecoveryReport`.
 // ============================================================================
 // Erreurs spécifiques au serveur Cortex
 // ============================================================================
@@ -785,10 +793,7 @@ impl<C: LlmClient + Clone> CortexServer<C> {
     }
 
     /// Outil `abort` : emergency stop d'un projet.
-    pub async fn abort(
-        &self,
-        request: AbortRequest,
-    ) -> Result<AbortResponse, CortexServerError> {
+    pub async fn abort(&self, request: AbortRequest) -> Result<AbortResponse, CortexServerError> {
         let now = chrono::Utc::now().timestamp_millis();
 
         let entry_id = self
@@ -822,6 +827,24 @@ impl<C: LlmClient + Clone> CortexServer<C> {
             aborted_at: now,
         })
     }
+
+    /// Outil `recover_project` : recovery post-crash d'un projet.
+    ///
+    /// Appelé typiquement au démarrage du serveur ou via un cron.
+    /// Liste les entries uncommitted et applique les politiques :
+    /// - actions terminales (abort, rollback, approval_received) → commit
+    /// - actions in-flight (sync_reflect, task_completed) → escalate
+    /// - reste → rollback
+    pub async fn recover_project(
+        &self,
+        request: RecoverProjectRequest,
+    ) -> Result<cortex_core::RecoveryReport, CortexServerError> {
+        self.wal
+            .recover_uncommitted(&request.project_id)
+            .await
+            .map_err(|e| CortexServerError::WalError(e.to_string()))
+    }
+
     /// Référence au WAL service (pour usage avancé, ex: tools.rs).
     pub fn wal(&self) -> &WalService {
         &self.wal

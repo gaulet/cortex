@@ -23,7 +23,9 @@ pub use context::*;
 pub use error::*;
 pub use routing::RoutingRules;
 pub use scratchpad::*;
-pub use wal::{CortexCommit, WalEntry, WalService};
+pub use wal::{
+    CortexCommit, RecoveryAction, RecoveryReport, WalEntry, WalService,
+};
 
 /// Génère un nouvel ID de projet unique.
 pub fn generate_project_id() -> String {

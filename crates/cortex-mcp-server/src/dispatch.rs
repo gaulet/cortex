@@ -16,9 +16,7 @@
 use cortex_brains::LlmClient;
 use serde_json::{json, Value as JsonValue};
 
-use crate::protocol::{
-    JsonRpcError, JsonRpcResponse, INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR,
-};
+use crate::protocol::{JsonRpcError, INVALID_PARAMS, METHOD_NOT_FOUND};
 use crate::server::{CortexServer, InterceptPlanRequest};
 
 // ============================================================================
@@ -216,6 +214,17 @@ fn handle_tools_list() -> DispatchResult {
                 "required": ["project_id", "reason"]
             }
         }),
+        json!({
+            "name": "recover_project",
+            "description": "Crash recovery: lists uncommitted WAL entries and applies per-action policies (commit terminal / escalate in-flight / rollback unknown). Returns RecoveryReport with rolled_back and escalated entry_ids.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string"}
+                },
+                "required": ["project_id"]
+            }
+        }),
     ];
     Ok(json!({"tools": tools}))
 }
@@ -261,6 +270,7 @@ async fn handle_tools_call<C: LlmClient + Clone>(
         "check_jobs_status" => handle_check_jobs_status(server, arguments).await,
         "rollback" => handle_rollback(server, arguments).await,
         "abort" => handle_abort(server, arguments).await,
+        "recover_project" => handle_recover_project(server, arguments).await,
         _ => Err(JsonRpcError {
             code: METHOD_NOT_FOUND,
             message: format!("Unknown tool: {}", tool_name),
@@ -347,29 +357,61 @@ async fn handle_pre_mortem<C: LlmClient + Clone>(
     arguments: JsonValue,
 ) -> DispatchResult {
     let request =
-        serde_json::from_value::<crate::server::PreMortemRequest>(arguments)
-            .map_err(|e| JsonRpcError {
+        serde_json::from_value::<crate::server::PreMortemRequest>(arguments).map_err(|e| {
+            JsonRpcError {
                 code: INVALID_PARAMS,
                 message: format!("Invalid params for pre_mortem: {}", e),
                 data: None,
-            })?;
-
+            }
+        })?;
     let response = server.pre_mortem(request).await.map_err(|e| JsonRpcError {
         code: crate::protocol::INTERNAL_ERROR,
         message: format!("pre_mortem failed: {}", e),
         data: None,
     })?;
+    tool_response(response)
+}
 
-    let content = serde_json::to_value(&response).map_err(|e| JsonRpcError {
+async fn handle_abort<C: LlmClient + Clone>(
+    server: &CortexServer<C>,
+    arguments: JsonValue,
+) -> DispatchResult {
+    let request =
+        serde_json::from_value::<crate::server::AbortRequest>(arguments).map_err(|e| {
+            JsonRpcError {
+                code: INVALID_PARAMS,
+                message: format!("Invalid params for abort: {}", e),
+                data: None,
+            }
+        })?;
+    let response = server.abort(request).await.map_err(|e| JsonRpcError {
         code: crate::protocol::INTERNAL_ERROR,
-        message: format!("serialization failed: {}", e),
+        message: format!("abort failed: {}", e),
         data: None,
     })?;
+    tool_response(response)
+}
 
-    Ok(json!({"content": [{
-        "type": "text",
-        "text": serde_json::to_string_pretty(&content).unwrap()
-    }]}))
+async fn handle_recover_project<C: LlmClient + Clone>(
+    server: &CortexServer<C>,
+    arguments: JsonValue,
+) -> DispatchResult {
+    let request =
+        serde_json::from_value::<crate::server::RecoverProjectRequest>(arguments).map_err(
+            |e| JsonRpcError {
+                code: INVALID_PARAMS,
+                message: format!("Invalid params for recover_project: {}", e),
+                data: None,
+            },
+        )?;
+    let response = server.recover_project(request).await.map_err(|e| {
+        JsonRpcError {
+            code: crate::protocol::INTERNAL_ERROR,
+            message: format!("recover_project failed: {}", e),
+            data: None,
+        }
+    })?;
+    tool_response(response)
 }
 
 /// Handler red_team_audit : audit adversarial d'un artéfact.
@@ -533,24 +575,6 @@ async fn handle_rollback<C: LlmClient + Clone>(
     tool_response(response)
 }
 
-async fn handle_abort<C: LlmClient + Clone>(
-    server: &CortexServer<C>,
-    arguments: JsonValue,
-) -> DispatchResult {
-    let request = serde_json::from_value::<crate::server::AbortRequest>(arguments)
-        .map_err(|e| JsonRpcError {
-            code: INVALID_PARAMS,
-            message: format!("Invalid params for abort: {}", e),
-            data: None,
-        })?;
-    let response = server.abort(request).await.map_err(|e| JsonRpcError {
-        code: crate::protocol::INTERNAL_ERROR,
-        message: format!("abort failed: {}", e),
-        data: None,
-    })?;
-    tool_response(response)
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -597,7 +621,7 @@ mod tests {
     async fn test_handle_tools_list() {
         let result = handle_tools_list().expect("should succeed");
         let tools = result["tools"].as_array().expect("should be array");
-        assert_eq!(tools.len(), 10);
+        assert_eq!(tools.len(), 11);
 
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"get_routing_rules"));
