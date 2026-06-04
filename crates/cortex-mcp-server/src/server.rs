@@ -11,6 +11,7 @@ use std::sync::Arc;
 use cortex_brains::{Architect, FractalPlan, LlmClient};
 use cortex_core::{metrics::HistogramExt, RecoveryReport, RoutingRules, SharedMetrics, WalService};
 use cortex_actors::{ActorRegistry, ProjectActorHandle, JobResult, AuditRecord};
+use cortex_webhooks::{WebhookDispatcher, WebhookEvent};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -324,6 +325,10 @@ pub struct CortexServer<C: LlmClient + Clone> {
     /// Chaque project_id a son ProjectActor qui owns son state.
     /// Race-free, async-first, pas de Mutex.
     pub actor_registry: Arc<ActorRegistry>,
+    /// Webhook dispatcher (Session 6, option B).
+    /// None = webhooks désactivés (CORTEX_WEBHOOK_URLS vide).
+    /// When Some, émet des notifications HTTP sur événements critiques.
+    pub webhook_dispatcher: Option<WebhookDispatcher>,
 }
 
 impl<C: LlmClient + Clone> CortexServer<C> {
@@ -356,6 +361,11 @@ impl<C: LlmClient + Clone> CortexServer<C> {
         metrics: SharedMetrics,
         actor_registry: Arc<ActorRegistry>,
     ) -> Self {
+        // Lit la config webhook depuis l'env au démarrage.
+        // Si CORTEX_WEBHOOK_URLS est vide, dispatcher = None (zéro overhead).
+        let webhook_cfg = cortex_webhooks::WebhookConfig::from_env();
+        let webhook_dispatcher = WebhookDispatcher::new(webhook_cfg);
+
         Self {
             wal: Arc::new(wal),
             llm_client,
@@ -364,6 +374,7 @@ impl<C: LlmClient + Clone> CortexServer<C> {
             hmac_secret: None,
             metrics,
             actor_registry,
+            webhook_dispatcher,
         }
     }
 
@@ -407,6 +418,27 @@ impl<C: LlmClient + Clone> CortexServer<C> {
             hmac_secret: None,
             metrics: Arc::new(cortex_core::Metrics::new()),
             actor_registry: Arc::new(ActorRegistry::new()),
+            webhook_dispatcher: None,
+        }
+    }
+
+    /// Active le dispatcher webhooks avec une config explicite (pour tests).
+    /// Écrase la config auto-détectée depuis l'env.
+    pub fn with_webhooks(mut self, config: cortex_webhooks::WebhookConfig) -> Self {
+        self.webhook_dispatcher = WebhookDispatcher::new(config);
+        self
+    }
+
+    /// Helper : fire un webhook si le dispatcher est actif. No-op sinon.
+    /// Garde le code des handlers propre (un seul `if let Some(d) = ...`).
+    fn fire_webhook(
+        &self,
+        event: WebhookEvent,
+        project_id: Option<String>,
+        data: serde_json::Value,
+    ) {
+        if let Some(dispatcher) = &self.webhook_dispatcher {
+            dispatcher.fire(event, project_id, data);
         }
     }
 
@@ -498,6 +530,18 @@ impl<C: LlmClient + Clone> CortexServer<C> {
             )
             .await?;
 
+        // Session 6 (option B) : webhook plan_generated
+        self.fire_webhook(
+            WebhookEvent::PlanGenerated,
+            Some(project_id.clone()),
+            serde_json::json!({
+                "themes_count": plan.themes.len(),
+                "total_tasks": plan.themes.iter().map(|t| t.tasks.len()).sum::<usize>(),
+                "max_criticity": plan.themes.iter().map(|t| t.criticity_score).max().unwrap_or(0),
+                "summary": summary,
+            }),
+        );
+
         Ok(InterceptPlanResponse {
             project_id,
             plan,
@@ -535,6 +579,16 @@ impl<C: LlmClient + Clone> CortexServer<C> {
             .await?;
         self.metrics
             .add_pre_mortem_guards(result.guardrails.len() as u64);
+
+        // Session 6 (option B) : webhook pre_mortem_emitted
+        self.fire_webhook(
+            WebhookEvent::PreMortemEmitted,
+            Some(request.job_id.clone()),
+            serde_json::json!({
+                "guardrails_count": result.guardrails.len(),
+                "risk_score": result.estimated_risk_score,
+            }),
+        );
 
         Ok(PreMortemResponse {
             job_id: result.job_id,
@@ -601,6 +655,20 @@ impl<C: LlmClient + Clone> CortexServer<C> {
 
         if !result.passed {
             self.metrics.inc_red_team_blocks();
+        }
+
+        // Session 6 (option B) : webhook audit_failed (uniquement si bloqué)
+        if !result.passed {
+            self.fire_webhook(
+                WebhookEvent::AuditFailed,
+                Some(result.job_id.clone()),
+                serde_json::json!({
+                    "issues_count": result.issues.len(),
+                    "critical_issues": result.issues.iter()
+                        .filter(|i| matches!(i.severity, cortex_brains::red_team::Severity::Critical))
+                        .count(),
+                }),
+            );
         }
 
         Ok(RedTeamAuditResponse {
@@ -830,6 +898,18 @@ impl<C: LlmClient + Clone> CortexServer<C> {
             })
             .await;
 
+        // Session 6 (option B) : webhook audit_failed si action == "escalate"
+        if action == "escalate" {
+            self.fire_webhook(
+                WebhookEvent::AuditFailed,
+                Some(request.job_id.clone()),
+                serde_json::json!({
+                    "action": action,
+                    "issues_count": audit.issues.len(),
+                }),
+            );
+        }
+
         Ok(SyncReflectResponse {
             job_id: request.job_id,
             passed: audit.passed,
@@ -1013,6 +1093,16 @@ impl<C: LlmClient + Clone> CortexServer<C> {
             )
             .await?;
 
+        // Session 6 (option B) : webhook abort
+        self.fire_webhook(
+            WebhookEvent::Abort,
+            Some(request.project_id.clone()),
+            serde_json::json!({
+                "reason": request.reason,
+                "aborted_at": now,
+            }),
+        );
+
         Ok(AbortResponse {
             project_id: request.project_id,
             aborted: true,
@@ -1051,6 +1141,19 @@ impl<C: LlmClient + Clone> CortexServer<C> {
             .get_or_create(&request.project_id, &request.project_id, "")
         {
             let _ = actor.clear_aborted().await;
+        }
+
+        // Session 6 (option B) : webhook recovery_triggered (uniquement si entrées à traiter)
+        if report.uncommitted_count > 0 {
+            self.fire_webhook(
+                WebhookEvent::RecoveryTriggered,
+                Some(request.project_id.clone()),
+                serde_json::json!({
+                    "uncommitted_count": report.uncommitted_count,
+                    "rolled_back_count": report.rolled_back.len(),
+                    "escalated_count": report.escalated.len(),
+                }),
+            );
         }
 
         Ok(report)

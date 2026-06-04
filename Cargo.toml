@@ -4,6 +4,7 @@ members = [
     "crates/cortex-actors",
     "crates/cortex-brains",
     "crates/cortex-security",
+    "crates/cortex-webhooks",
     "crates/cortex-mcp-server",
 ]
 resolver = "2"

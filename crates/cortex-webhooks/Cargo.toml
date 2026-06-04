@@ -1,0 +1,31 @@
+[package]
+name = "cortex-webhooks"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+# HTTP client
+reqwest = { workspace = true }
+# Logging
+tracing = { workspace = true }
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+# Time
+chrono = { workspace = true }
+# Crypto (HMAC signing optionnel)
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = "0.4"
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
