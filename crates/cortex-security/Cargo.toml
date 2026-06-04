@@ -1,0 +1,18 @@
+[package]
+name = "cortex-security"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Security utilities for Cortex MCP (HMAC, validation)"
+
+[dependencies]
+cortex-core = { path = "../cortex-core" }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

@@ -1,0 +1,22 @@
+[package]
+name = "cortex-actors"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Actor Model implementation for Cortex MCP (tokio)"
+
+[dependencies]
+cortex-core = { path = "../cortex-core" }
+cortex-brains = { path = "../cortex-brains" }
+cortex-security = { path = "../cortex-security" }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+dashmap = { workspace = true }
+uuid = { workspace = true }

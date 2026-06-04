@@ -1,0 +1,39 @@
+# Rust specific
+/target/
+**/*.rs.bk
+
+# Build artifacts
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Generated files
+*.log
+docs/auto/
+
+# SQLite
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+
+# Artifacts
+*.backup
+/tmp/
+
+# Test artifacts
+test-output/
+coverage/
+tarpaulin-report.html

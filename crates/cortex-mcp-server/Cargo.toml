@@ -1,0 +1,27 @@
+[package]
+name = "cortex-mcp-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Cortex MCP server (stdio) - strategic brain for Hermes Agent"
+
+[[bin]]
+name = "cortex-mcp"
+path = "src/main.rs"
+
+[dependencies]
+cortex-core = { path = "../cortex-core" }
+cortex-actors = { path = "../cortex-actors" }
+cortex-brains = { path = "../cortex-brains" }
+cortex-security = { path = "../cortex-security" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+# rmcp = { version = "0.1", features = ["server", "transport-io"] }

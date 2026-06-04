@@ -1,0 +1,16 @@
+[package]
+name = "cortex-brains"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "LLM reasoning brains for Cortex MCP (Architect, Pre-Mortem, Red-Team)"
+
+[dependencies]
+cortex-core = { path = "../cortex-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+async-trait = { workspace = true }
