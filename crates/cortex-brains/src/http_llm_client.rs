@@ -162,7 +162,9 @@ impl HttpLlmClient {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
-            .map_err(|e| LlmError::RequestFailed(format!("failed to build reqwest client: {}", e)))?;
+            .map_err(|e| {
+                LlmError::RequestFailed(format!("failed to build reqwest client: {}", e))
+            })?;
         Ok(Self {
             client,
             api_key: api_key.into(),
@@ -183,7 +185,9 @@ impl HttpLlmClient {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
             .build()
-            .map_err(|e| LlmError::RequestFailed(format!("failed to build reqwest client: {}", e)))?;
+            .map_err(|e| {
+                LlmError::RequestFailed(format!("failed to build reqwest client: {}", e))
+            })?;
         Ok(Self { client, ..self })
     }
 

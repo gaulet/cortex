@@ -6,7 +6,10 @@ use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde_json::Value as JsonValue;
 use sha2::Sha256;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+
 use tracing::{debug, error, warn};
 
 /// Dispatcher de webhooks. Clone-able et Send (utilisable dans tout le code async).
@@ -18,6 +21,10 @@ pub struct WebhookDispatcher {
 struct Inner {
     config: WebhookConfig,
     http: Client,
+    /// Session 7 hardening : compteur de webhooks actuellement en cours
+    /// de livraison (dans une tokio task spawned). Utilisé par
+    /// `wait_for_in_flight()` pour le graceful shutdown.
+    in_flight: AtomicUsize,
 }
 
 impl WebhookDispatcher {
@@ -31,7 +38,11 @@ impl WebhookDispatcher {
             .build()
             .expect("reqwest client should build with default config");
         Some(Self {
-            inner: Arc::new(Inner { config, http }),
+            inner: Arc::new(Inner {
+                config,
+                http,
+                in_flight: AtomicUsize::new(0),
+            }),
         })
     }
 
@@ -42,11 +53,49 @@ impl WebhookDispatcher {
     pub fn fire(&self, event: WebhookEvent, project_id: Option<String>, data: JsonValue) {
         let payload = WebhookPayload::new(event, project_id, data);
         let dispatcher = self.clone();
+        // Session 7 hardening : incrémenter le compteur AVANT le spawn.
+        self.inner.in_flight.fetch_add(1, Ordering::Relaxed);
         tokio::spawn(async move {
             // Best-effort : on ignore volontairement le Result de deliver().
             // Les erreurs sont loggées en interne par le dispatcher.
             let _ = dispatcher.deliver(payload).await;
+            // Décrémenter APRÈS la livraison (succès ou échec).
+            dispatcher.inner.in_flight.fetch_sub(1, Ordering::Relaxed);
         });
+    }
+
+    /// Nombre de webhooks actuellement en cours de livraison.
+    ///
+    /// Utile pour logging/visibilité (ex: `cortex_webhooks_in_flight` gauge).
+    pub fn in_flight_count(&self) -> usize {
+        self.inner.in_flight.load(Ordering::Relaxed)
+    }
+
+    /// Attend que tous les webhooks in-flight soient livrés (ou timeout).
+    ///
+    /// Retourne `true` si tous sont terminés avant le timeout, `false` sinon.
+    /// Utilisé par le graceful shutdown du binaire pour ne pas perdre
+    /// de notifications critiques quand l'utilisateur fait Ctrl+C.
+    ///
+    /// Poll toutes les 50ms (pas de `Notify` : on veut un timeout strict).
+    pub async fn wait_for_in_flight(&self, timeout: Duration) -> bool {
+        let start = std::time::Instant::now();
+        loop {
+            let n = self.in_flight_count();
+            if n == 0 {
+                return true;
+            }
+            if start.elapsed() >= timeout {
+                warn!(
+                    in_flight = n,
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "wait_for_in_flight timeout: {} webhooks still pending",
+                    n
+                );
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     /// Variante synchrone (attend la livraison complète). Utile pour les tests.

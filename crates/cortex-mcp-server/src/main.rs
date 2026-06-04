@@ -102,28 +102,83 @@ async fn main() -> Result<()> {
     // 3. LLM client
     let llm = build_llm_client().context("Failed to build LLM client")?;
     let architect = Architect::new(llm.clone());
-    let server = CortexServer::new(wal, architect, llm)
-        .with_hmac_secret(std::env::var("CORTEX_HMAC_SECRET").ok().as_deref());
-    if server.hmac_secret.is_some() {
-        info!("HMAC signing enabled (guardrails will be signed)");
-    } else {
-        info!("HMAC signing disabled (set CORTEX_HMAC_SECRET to enable)");
+    let hmac_secret = std::env::var("CORTEX_HMAC_SECRET").ok();
+    let server = CortexServer::new(wal, architect, llm).with_hmac_secret(hmac_secret.as_deref());
+
+    // Session 7 hardening : distinction explicite entre
+    // "secret non set" (HMAC désactivé, OK par défaut) et
+    // "secret set mais vide" (string vide → HMAC désactivé, ATTENTION).
+    // La string vide est probablement un oubli de l'utilisateur.
+    match hmac_secret.as_deref() {
+        Some("") => {
+            warn!(
+                "CORTEX_HMAC_SECRET is set but EMPTY — HMAC signing disabled. \
+                 This is likely a misconfiguration: guardrails can be tampered."
+            );
+        }
+        Some(_) => {
+            info!("HMAC signing enabled (guardrails will be signed, anti-tampering active)");
+        }
+        None => {
+            info!("HMAC signing disabled (CORTEX_HMAC_SECRET unset — set it to enable anti-tampering)");
+        }
     }
+
+    // Webhook HMAC : même logique, warning explicite si vide.
+    match std::env::var("CORTEX_WEBHOOK_HMAC_SECRET").ok().as_deref() {
+        Some("") => {
+            warn!(
+                "CORTEX_WEBHOOK_HMAC_SECRET is set but EMPTY — webhook signatures disabled. \
+                 Webhook receivers cannot verify authenticity."
+            );
+        }
+        Some(_) => {
+            info!("Webhook HMAC signing enabled (X-Cortex-Signature header sent)");
+        }
+        None => {
+            info!("Webhook HMAC signing disabled (CORTEX_WEBHOOK_HMAC_SECRET unset)");
+        }
+    }
+
     info!("Ready. Entering stdio loop (Ctrl+C to exit).");
 
-    // 4. Stdio loop
+    // 4. Stdio loop avec graceful shutdown
+    // Session 7 hardening : sur Ctrl+C, on attend que les webhooks
+    // in-flight finissent leur livraison (5s max) avant d'exit.
+    // Sans ça, des notifications critiques sont perdues à chaque exit.
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut stdout_handle = stdout.lock();
+    let webhook_dispatcher = server.webhook_dispatcher.clone();
 
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(e) => {
-                error!("Failed to read stdin: {}", e);
-                break;
+    'main_loop: loop {
+        // select! entre lire stdin et signal Ctrl+C
+        tokio::select! {
+            // Branche 1 : signal shutdown (Ctrl+C)
+            _ = tokio::signal::ctrl_c() => {
+                info!("Ctrl+C received, initiating graceful shutdown...");
+                break 'main_loop;
             }
-        };
+            // Branche 2 : lire une ligne de stdin
+            line_result = async {
+                let mut lines = stdin.lock().lines();
+                match lines.next() {
+                    Some(Ok(l)) => Ok(l),
+                    Some(Err(e)) => Err(e),
+                    None => Ok(String::new()), // EOF
+                }
+            } => {
+                let line = match line_result {
+                    Ok(l) if l.is_empty() => {
+                        // EOF sur stdin (le client MCP a fermé)
+                        break 'main_loop;
+                    }
+                    Ok(l) => l,
+                    Err(e) => {
+                        error!("Failed to read stdin: {}", e);
+                        break 'main_loop;
+                    }
+                };
 
         let parsed = JsonRpcRequest::parse_line(&line);
         let response = match parsed {
@@ -158,9 +213,33 @@ async fn main() -> Result<()> {
             stdout_handle.write_all(line.as_bytes())?;
             stdout_handle.flush()?;
         }
+            }
+        }
     }
 
-    info!("Stdin closed. Shutting down.");
+    // Session 7 hardening : attendre que les webhooks in-flight finissent.
+    let in_flight = webhook_dispatcher
+        .as_ref()
+        .map(|d| d.in_flight_count())
+        .unwrap_or(0);
+    if in_flight > 0 {
+        info!(
+            in_flight = in_flight,
+            "Waiting up to 5s for in-flight webhooks to complete..."
+        );
+        if let Some(d) = webhook_dispatcher.as_ref() {
+            let completed = d
+                .wait_for_in_flight(std::time::Duration::from_secs(5))
+                .await;
+            if completed {
+                info!("All in-flight webhooks delivered. Clean shutdown.");
+            } else {
+                warn!("Some webhooks did not complete in time. They will be lost.");
+            }
+        }
+    }
+
+    info!("Shutdown complete. Goodbye!");
     Ok(())
 }
 

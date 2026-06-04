@@ -278,3 +278,73 @@ async fn test_e2e_no_dispatch_when_disabled() {
     let cfg = WebhookConfig::from_urls(vec![]);
     assert!(WebhookDispatcher::new(cfg).is_none());
 }
+
+/// Session 7 hardening : `wait_for_in_flight` doit retourner true
+/// quand tous les webhooks in-flight sont livrés avant le timeout.
+/// C'est utilisé par le graceful shutdown du binaire.
+#[tokio::test]
+async fn test_e2e_wait_for_in_flight_returns_true_when_idle() {
+    let cfg = WebhookConfig::from_urls(vec!["http://127.0.0.1:1/".to_string()])
+        .with_timeout(std::time::Duration::from_millis(100));
+    let dispatcher = WebhookDispatcher::new(cfg).expect("dispatcher");
+
+    // Aucun webhook fired → in_flight = 0 → wait doit retourner true immédiatement.
+    let start = std::time::Instant::now();
+    let completed = dispatcher
+        .wait_for_in_flight(std::time::Duration::from_secs(2))
+        .await;
+    let elapsed = start.elapsed();
+    assert!(completed, "wait_for_in_flight should return true when idle");
+    assert!(
+        elapsed < std::time::Duration::from_millis(100),
+        "should be near-instant, took {:?}",
+        elapsed
+    );
+}
+
+/// Session 7 hardening : `wait_for_in_flight` doit retourner false
+/// si le timeout est dépassé (webhook toujours en cours).
+#[tokio::test]
+async fn test_e2e_wait_for_in_flight_timeout() {
+    // URL qui n'accepte pas de connexions (port 1) → webhook va timeout
+    // au bout de 100ms (config timeout) puis retry. Total > timeout du wait.
+    let cfg = WebhookConfig::from_urls(vec!["http://127.0.0.1:1/".to_string()])
+        .with_timeout(std::time::Duration::from_millis(50))
+        .with_max_retries(3);
+    let dispatcher = WebhookDispatcher::new(cfg).expect("dispatcher");
+
+    // Fire 1 webhook → il va timeout+retry pendant >500ms
+    dispatcher.fire(
+        WebhookEvent::Abort,
+        Some("p-timeout".to_string()),
+        serde_json::json!({}),
+    );
+
+    // Vérifier que in_flight > 0 juste après le fire
+    assert_eq!(
+        dispatcher.in_flight_count(),
+        1,
+        "in_flight should be 1 right after fire()"
+    );
+
+    // wait_for_in_flight(200ms) doit retourner false (webhook pas fini)
+    let start = std::time::Instant::now();
+    let completed = dispatcher
+        .wait_for_in_flight(std::time::Duration::from_millis(200))
+        .await;
+    let elapsed = start.elapsed();
+    assert!(
+        !completed,
+        "wait_for_in_flight should return false (timeout reached)"
+    );
+    assert!(
+        elapsed >= std::time::Duration::from_millis(200),
+        "should have waited full timeout, only waited {:?}",
+        elapsed
+    );
+
+    // Cleanup : attendre que le webhook finisse vraiment (pour ne pas leak la task)
+    let _ = dispatcher
+        .wait_for_in_flight(std::time::Duration::from_secs(5))
+        .await;
+}

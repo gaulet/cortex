@@ -29,6 +29,18 @@ impl WebhookConfig {
         }
     }
 
+    /// Builder : override le timeout par requête.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Builder : override le nombre max de retries.
+    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
+        self.max_retries = max_retries;
+        self
+    }
+
     /// Lit la config depuis l'environnement.
     ///
     /// Variables :

@@ -330,8 +330,31 @@ impl WalService {
     // PUBLIC API : dispatch automatique selon le backend
     // ============================================================
 
-    /// Recover uncommitted WAL entries (crash recovery).
+    /// Session 7 hardening : sérialise les recovers concurrents sur
+    /// le même project_id via try_lock-or-skip.
     pub async fn recover_uncommitted(&self, project_id: &str) -> Result<RecoveryReport> {
+        // RAII guard qui :
+        // 1) tient le tokio lock (via OwnedMutexGuard)
+        // 2) à la drop, tente de retirer l'entry de la DashMap si on
+        //    est le dernier à la tenir (memory leak prevention pour
+        //    les long-running servers qui font beaucoup de recover
+        //    sur des projets différents).
+        struct LockGuard {
+            _tokio_guard: tokio::sync::OwnedMutexGuard<()>,
+            map: std::sync::Arc<dashmap::DashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+            key: String,
+        }
+        impl Drop for LockGuard {
+            fn drop(&mut self) {
+                // remove_if retire l'entry si elle existe ET si on
+                // est le dernier à la tenir (strong_count == 1).
+                // Sinon, on laisse l'entry ; un futur appel la
+                // réutilisera ou la retirera à son tour.
+                self.map.remove_if(&self.key.clone(), |_, v| {
+                    std::sync::Arc::strong_count(v) == 1
+                });
+            }
+        }
         // Session 7 hardening : sérialise les recovers concurrents sur
         // le même project_id via try_lock-or-skip.
         //
@@ -348,8 +371,16 @@ impl WalService {
             .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
             .clone();
 
-        let _guard = match lock.try_lock() {
-            Ok(g) => g,
+        // try_lock_owned() : on transfère l'ownership du guard au LockGuard.
+        // Comme ça le guard reste vivant jusqu'à la fin de la fonction
+        // (sinon le lock serait drop immédiatement, et un autre call
+        // pourrait prendre le lock → race condition).
+        let _guard = match lock.clone().try_lock_owned() {
+            Ok(tokio_guard) => LockGuard {
+                _tokio_guard: tokio_guard,
+                map: self.recovery_locks.clone(),
+                key: project_id.to_string(),
+            },
             Err(_) => {
                 tracing::info!(
                     project_id = %project_id,
@@ -365,7 +396,7 @@ impl WalService {
         };
 
         // Le lock est tenu : on est seul à faire le recovery.
-        // Le _guard est droppé à la fin de la fonction, libérant le lock.
+        // Le _guard nettoiera la DashMap à la fin.
         let uncommitted = self.list_uncommitted(project_id).await?;
         let mut report = RecoveryReport {
             project_id: project_id.to_string(),
