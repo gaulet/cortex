@@ -1265,4 +1265,151 @@ mod tests {
         assert!(latest.is_some());
         assert_eq!(latest.unwrap().commit_id, commit_id);
     }
+
+    // ============================================================
+    // LIVE Postgres integration tests (Session 6 - E.2)
+    // ============================================================
+    //
+    // Ces tests sont #[ignore] par défaut (pas de PG dans la CI standard).
+    // Pour les exécuter : TEST_POSTGRES_URL=postgres://... cargo test --features postgres -- --include-ignored
+    //
+    // Ils testent le vrai cycle CRUD + recovery contre une vraie instance PG.
+
+    #[cfg(feature = "postgres")]
+    fn live_pg_url() -> Option<String> {
+        std::env::var("TEST_POSTGRES_URL").ok()
+    }
+
+    #[cfg(feature = "postgres")]
+    async fn live_pg_wal() -> Option<WalService> {
+        let url = live_pg_url()?;
+        // Chaque test utilise un project_id unique pour éviter les collisions
+        // entre exécutions parallèles.
+        WalService::connect(&url).await.ok()
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    #[ignore = "requires TEST_POSTGRES_URL env var (live Postgres)"]
+    async fn live_postgres_write_prepare_and_commit() {
+        let wal = match live_pg_wal().await {
+            Some(w) => w,
+            None => {
+                eprintln!("TEST_POSTGRES_URL not set, skipping");
+                return;
+            }
+        };
+        assert_eq!(wal.backend_kind(), BackendKind::Postgres);
+
+        let entry_id = wal
+            .write_prepare(
+                "live_proj_1",
+                "live_action",
+                None,
+                None,
+                &json!({"live": true}),
+            )
+            .await
+            .expect("live write_prepare");
+        wal.write_commit(&entry_id)
+            .await
+            .expect("live write_commit");
+
+        let entry = wal
+            .read_entry(&entry_id)
+            .await
+            .expect("live read_entry");
+        assert_eq!(entry.action, "live_action");
+        assert!(entry.committed);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    #[ignore = "requires TEST_POSTGRES_URL env var (live Postgres)"]
+    async fn live_postgres_save_and_load_state_jsonb() {
+        let wal = match live_pg_wal().await {
+            Some(w) => w,
+            None => return,
+        };
+        // Test que JSONB fonctionne (round-trip avec structure imbriquée).
+        let state = json!({
+            "plan": {
+                "themes": [
+                    {"id": "TH-1", "name": "Live test", "criticity": 4}
+                ]
+            },
+            "metadata": {"key": "value", "count": 42}
+        });
+        wal.save_state("live_proj_state", &state, Some("live handoff"))
+            .await
+            .expect("live save_state");
+        let loaded = wal
+            .load_state("live_proj_state")
+            .await
+            .expect("live load_state");
+        assert_eq!(loaded, Some(state));
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    #[ignore = "requires TEST_POSTGRES_URL env var (live Postgres)"]
+    async fn live_postgres_recovery_all_policies() {
+        let wal = match live_pg_wal().await {
+            Some(w) => w,
+            None => return,
+        };
+        // Crée 3 entries : 1 commit, 1 sync_reflect (escalate), 1 unknown (rollback)
+        let committed = wal
+            .write_prepare("live_proj_rec", "approval_received", None, None, &json!({}))
+            .await
+            .expect("prepare 1");
+        wal.write_commit(&committed).await.expect("commit 1");
+
+        let _to_escalate = wal
+            .write_prepare("live_proj_rec", "sync_reflect", Some("J-1"), None, &json!({}))
+            .await
+            .expect("prepare 2");
+
+        let _to_rollback = wal
+            .write_prepare("live_proj_rec", "unknown_action_xyz", None, None, &json!({}))
+            .await
+            .expect("prepare 3");
+
+        let report = wal
+            .recover_uncommitted("live_proj_rec")
+            .await
+            .expect("live recover");
+        assert_eq!(report.uncommitted_count, 2, "2 uncommitted");
+        assert_eq!(report.escalated.len(), 1, "sync_reflect → escalate");
+        assert_eq!(report.rolled_back.len(), 1, "unknown → rollback");
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    #[ignore = "requires TEST_POSTGRES_URL env var (live Postgres)"]
+    async fn live_postgres_concurrent_writers() {
+        // Vérifie que Postgres gère les writers concurrents (vs SQLite qui sérialise).
+        let wal = match live_pg_wal().await {
+            Some(w) => w,
+            None => return,
+        };
+        let mut handles = vec![];
+        for i in 0..5 {
+            let wal = wal.clone();
+            handles.push(tokio::spawn(async move {
+                wal.write_prepare(
+                    &format!("live_proj_conc_{}", i),
+                    "concurrent_write",
+                    None,
+                    None,
+                    &json!({"writer": i}),
+                )
+                .await
+            }));
+        }
+        for h in handles {
+            h.await.expect("task join").expect("write_prepare");
+        }
+        // Si on arrive ici sans panic ni lock timeout, c'est bon.
+    }
 }

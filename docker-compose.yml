@@ -1,0 +1,48 @@
+version: "3.9"
+
+# Docker Compose pour tester Cortex MCP en mode PostgreSQL.
+#
+# Usage:
+#   docker compose up -d
+#   export CORTEX_WAL_URL=postgres://cortex:cortex_dev_pw@localhost:5432/cortex_db
+#   cargo build --release -p cortex-mcp-server --no-default-features --features cortex-core/postgres
+#   ./target/release/cortex-mcp.exe
+#   docker compose down -v  # clean up
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: cortex-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cortex
+      POSTGRES_PASSWORD: cortex_dev_pw
+      POSTGRES_DB: cortex_db
+      # Logs plus verbeux pour le dev (utile pour debug)
+      POSTGRES_LOG_STATEMENT: "all"
+    ports:
+      - "5432:5432"
+    volumes:
+      - cortex_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cortex -d cortex_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # UI optionnelle pour explorer la DB (accessible sur http://localhost:8080)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: cortex-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@cortex.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_LISTEN_PORT: 80
+    ports:
+      - "8080:80"
+    profiles: ["ui"]  # désactivé par défaut, active avec: docker compose --profile ui up -d
+
+volumes:
+  cortex_pg_data:
+    driver: local
