@@ -76,6 +76,52 @@ impl<C: LlmClient> RedTeam<C> {
         Self { client }
     }
 
+    /// Vérifie l'intégrité HMAC des guardrails (couche 1, non-LLM).
+    ///
+    /// Si `expected_signature` est fourni ET `hmac_secret` est fourni :
+    /// - Recalcule le HMAC sur `{job_id, guardrails, definition_of_done}`
+    /// - Compare avec la signature attendue (constant-time via string equality)
+    /// - Retourne Ok(()) si match, Err(RedTeamError) sinon
+    ///
+    /// Si l'un des deux est None : warning + skip vérification.
+    pub fn verify_hmac(
+        job_id: &str,
+        guardrails: &[crate::paranoiac::ExecutableGuardrail],
+        definition_of_done: &str,
+        hmac_secret: Option<&[u8]>,
+        expected_signature: Option<&str>,
+    ) -> Result<(), RedTeamError> {
+        match (hmac_secret, expected_signature) {
+            (Some(secret), Some(expected)) => {
+                let payload = serde_json::json!({
+                    "job_id": job_id,
+                    "guardrails": guardrails,
+                    "definition_of_done": definition_of_done,
+                });
+                cortex_security::verify_guardrails(secret, &payload, expected)
+                    .map_err(|e| {
+                        RedTeamError::MissingField(format!(
+                            "HMAC verification failed: {} — guardrails may have been tampered with",
+                            e
+                        ))
+                    })
+            }
+            (None, Some(_)) => {
+                tracing::warn!(
+                    "Guardrails have HMAC signature but no server secret configured — skipping verify"
+                );
+                Ok(())
+            }
+            (Some(_), None) => {
+                tracing::warn!(
+                    "Server has HMAC secret but guardrails are unsigned — possible downgrade attack"
+                );
+                Ok(())
+            }
+            (None, None) => Ok(()), // Nothing to verify
+        }
+    }
+
     /// Audite un artéfact produit par un worker.
     ///
     /// # Arguments
@@ -309,6 +355,80 @@ mod tests {
     use super::*;
     use crate::llm_client::MockLlmClient;
     use crate::paranoiac::ExecutableGuardrail;
+
+    #[test]
+    fn test_verify_hmac_no_secret_no_sig_ok() {
+        let result = RedTeam::<MockLlmClient>::verify_hmac(
+            "J-1",
+            &sample_guardrails(),
+            "DoD",
+            None,
+            None,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_hmac_matching_sig_ok() {
+        let guardrails = sample_guardrails();
+        let secret = b"super-secret-hmac-key";
+        let payload = serde_json::json!({
+            "job_id": "J-1",
+            "guardrails": &guardrails,
+            "definition_of_done": "DoD",
+        });
+        let sig = cortex_security::sign_guardrails(secret, &payload).unwrap();
+        let result = RedTeam::<MockLlmClient>::verify_hmac(
+            "J-1",
+            &guardrails,
+            "DoD",
+            Some(secret),
+            Some(&sig),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_hmac_tampered_guardrails_fails() {
+        let guardrails = sample_guardrails();
+        let secret = b"super-secret-hmac-key";
+        let payload = serde_json::json!({
+            "job_id": "J-1",
+            "guardrails": &guardrails,
+            "definition_of_done": "DoD",
+        });
+        let sig = cortex_security::sign_guardrails(secret, &payload).unwrap();
+        // Mutate guardrails
+        let mut tampered = guardrails.clone();
+        tampered[0].description = "MALICIOUS".into();
+        let result = RedTeam::<MockLlmClient>::verify_hmac(
+            "J-1",
+            &tampered,
+            "DoD",
+            Some(secret),
+            Some(&sig),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_hmac_wrong_secret_fails() {
+        let guardrails = sample_guardrails();
+        let payload = serde_json::json!({
+            "job_id": "J-1",
+            "guardrails": &guardrails,
+            "definition_of_done": "DoD",
+        });
+        let sig = cortex_security::sign_guardrails(b"right-secret", &payload).unwrap();
+        let result = RedTeam::<MockLlmClient>::verify_hmac(
+            "J-1",
+            &guardrails,
+            "DoD",
+            Some(b"wrong-secret"),
+            Some(&sig),
+        );
+        assert!(result.is_err());
+    }
 
     fn sample_guardrails() -> Vec<ExecutableGuardrail> {
         vec![

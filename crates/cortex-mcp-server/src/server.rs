@@ -298,6 +298,9 @@ pub struct CortexServer<C: LlmClient + Clone> {
     llm_client: C,
     architect: Architect<C>,
     routing_rules: RoutingRules,
+    /// HMAC-SHA256 secret pour signer les guardrails Pre-Mortem.
+    /// None = pas de signature (workers peuvent altérer les guardrails).
+    pub hmac_secret: Option<Vec<u8>>,
 }
 
 impl<C: LlmClient + Clone> CortexServer<C> {
@@ -308,7 +311,20 @@ impl<C: LlmClient + Clone> CortexServer<C> {
             llm_client,
             architect,
             routing_rules: RoutingRules::default_rules(),
+            hmac_secret: None,
         }
+    }
+
+    /// Configure le secret HMAC pour signer les guardrails Pre-Mortem.
+    ///
+    /// Si `secret` est vide ou None, le signing est désactivé.
+    pub fn with_hmac_secret(mut self, secret: Option<&str>) -> Self {
+        self.hmac_secret = secret
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::as_bytes)
+            .map(Vec::from);
+        self
     }
 
     /// Crée une instance avec des routing_rules custom (pour tests).
@@ -323,6 +339,7 @@ impl<C: LlmClient + Clone> CortexServer<C> {
             llm_client,
             architect,
             routing_rules,
+            hmac_secret: None,
         }
     }
 
@@ -420,6 +437,7 @@ impl<C: LlmClient + Clone> CortexServer<C> {
                 &request.job_description,
                 &request.definition_of_done,
                 &request.context,
+                self.hmac_secret.as_deref(),
             )
             .await?;
 

@@ -101,7 +101,13 @@ async fn main() -> Result<()> {
     // 3. LLM client
     let llm = build_llm_client().context("Failed to build LLM client")?;
     let architect = Architect::new(llm.clone());
-    let server = CortexServer::new(wal, architect, llm);
+    let server = CortexServer::new(wal, architect, llm)
+        .with_hmac_secret(std::env::var("CORTEX_HMAC_SECRET").ok().as_deref());
+    if server.hmac_secret.is_some() {
+        info!("HMAC signing enabled (guardrails will be signed)");
+    } else {
+        info!("HMAC signing disabled (set CORTEX_HMAC_SECRET to enable)");
+    }
     info!("Ready. Entering stdio loop (Ctrl+C to exit).");
 
     // 4. Stdio loop

@@ -43,6 +43,11 @@ pub struct PreMortemResult {
     pub guardrails: Vec<ExecutableGuardrail>,
     pub risk_assessment: String,
     pub estimated_risk_score: u8,
+    /// HMAC-SHA256 signature des guardrails + DoD (si signé).
+    /// Permet à Red-Team (couche 1) de détecter une altération par un worker.
+    /// Format hex 64 chars.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac_signature: Option<String>,
 }
 
 /// Erreurs spécifiques au Pre-Mortem.
@@ -77,12 +82,14 @@ impl<C: LlmClient> PreMortem<C> {
     /// - `job_description` : ce que le job doit faire
     /// - `definition_of_done` : critères de succès
     /// - `context` : environnement, contraintes
+    /// - `hmac_secret` : secret optionnel pour signer les guardrails
     pub async fn generate_guardrails(
         &self,
         job_id: &str,
         job_description: &str,
         definition_of_done: &str,
         context: &str,
+        hmac_secret: Option<&[u8]>,
     ) -> Result<PreMortemResult, PreMortemError> {
         let system = build_system_prompt();
         let user = build_user_prompt(job_id, job_description, definition_of_done, context);
@@ -104,11 +111,28 @@ impl<C: LlmClient> PreMortem<C> {
 
         let risk_assessment = build_risk_assessment(&guardrails);
 
+        // HMAC signing des guardrails + DoD (anti-tampering par workers)
+        let hmac_signature = hmac_secret.and_then(|secret| {
+            let payload = serde_json::json!({
+                "job_id": job_id,
+                "guardrails": &guardrails,
+                "definition_of_done": definition_of_done,
+            });
+            match cortex_security::sign_guardrails(secret, &payload) {
+                Ok(sig) => Some(sig),
+                Err(e) => {
+                    tracing::warn!("HMAC signing failed: {} — guardrails will be unsigned", e);
+                    None
+                }
+            }
+        });
+
         Ok(PreMortemResult {
             job_id: job_id.to_string(),
             guardrails,
             risk_assessment,
             estimated_risk_score: risk_score,
+            hmac_signature,
         })
     }
 }
@@ -338,6 +362,7 @@ mod tests {
                 "Migrate DB users table",
                 "All migrations applied",
                 "PostgreSQL 15",
+                None,
             )
             .await
             .expect("should work");
@@ -361,7 +386,7 @@ mod tests {
         let brain = PreMortem::new(mock);
 
         let result = brain
-            .generate_guardrails("J-1", "do thing", "ok", "")
+            .generate_guardrails("J-1", "do thing", "ok", "", None)
             .await
             .expect("should parse JSON from preamble");
         assert_eq!(result.guardrails.len(), 3);
@@ -373,7 +398,7 @@ mod tests {
         let brain = PreMortem::new(mock);
 
         let err = brain
-            .generate_guardrails("J-1", "do", "ok", "")
+            .generate_guardrails("J-1", "do", "ok", "", None)
             .await
             .expect_err("empty guardrails should fail");
 
@@ -390,7 +415,7 @@ mod tests {
         let brain = PreMortem::new(mock);
 
         let err = brain
-            .generate_guardrails("J-1", "do", "ok", "")
+            .generate_guardrails("J-1", "do", "ok", "", None)
             .await
             .expect_err("invalid F code should fail");
 
@@ -409,7 +434,7 @@ mod tests {
         let brain = PreMortem::new(mock);
 
         let err = brain
-            .generate_guardrails("J-1", "do", "ok", "")
+            .generate_guardrails("J-1", "do", "ok", "", None)
             .await
             .expect_err("empty description should fail");
 
@@ -513,7 +538,7 @@ mod tests {
         let mock = MockLlmClient::with_response("".to_string());
         let brain = PreMortem::new(mock);
         let err = brain
-            .generate_guardrails("J", "d", "ok", "")
+            .generate_guardrails("J-1", "d", "ok", "", None)
             .await
             .expect_err("empty response should fail");
         match err {
